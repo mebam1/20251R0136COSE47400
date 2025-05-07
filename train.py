@@ -286,7 +286,7 @@ def train(args, opts):
     if opts.checkpoint:
         checkpoint_path = os.path.join(opts.checkpoint, opts.checkpoint_file if opts.checkpoint_file else "latest_epoch.pth.tr")
         if os.path.exists(checkpoint_path):
-            checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
+            checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage, weights_only=False)
             model.load_state_dict(checkpoint['model'], strict=True)
 
             if opts.resume:

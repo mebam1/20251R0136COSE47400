@@ -9,6 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.modules.attention import Attention
 from model.modules.mlp import MLP
 from model.modules.crossattention import CrossAttention
+from model.modules.graph_attention import SpatialAttention
 from model.modules.ModelBlock import MIBlock
 os.environ['CUDA_VISIBLE_DEVICES'] = '0' 
 
@@ -21,6 +22,7 @@ class TransBlock(nn.Module):
                  mode='spatial', mixer_type="attention", use_temporal_similarity=True,
                  temporal_connection_len=1, neighbour_num=4, n_frames=243):
         super().__init__()
+        self.mode = mode
         self.norm1 = nn.LayerNorm(dim)
         self.mixer_type = mixer_type
         if mixer_type == 'crossattention': 
@@ -54,6 +56,8 @@ class TransBlock(nn.Module):
         elif mixer_type == 'attention':
             self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop,
                                    proj_drop=drop, mode=mode)
+        elif mixer_type == 'graph':
+            self.mixer = SpatialAttention(dim, dim, True, 8, drop=drop)
         self.norm2 = nn.LayerNorm(dim)
 
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -78,20 +82,26 @@ class TransBlock(nn.Module):
 
         if self.mixer_type == 'crossattention':
             x = self.forward_local(x)
-            self.len = x.shape[1] // 3
+            self.len = x.shape[1] // 3 # L = T//3 in the paper.
             x = self.forward_cross(x,self.len)
             return x
-        if self.use_layer_scale:
-            x = x + self.drop_path(
-                self.layer_scale_1.unsqueeze(0).unsqueeze(0)
-                * self.mixer(self.norm1(x)))
-            x = x + self.drop_path(
-                self.layer_scale_2.unsqueeze(0).unsqueeze(0)
-                * self.mlp(self.norm2(x)))
+        elif self.mixer_type == 'attention':
+            if self.use_layer_scale:
+                x = x + self.drop_path(
+                    self.layer_scale_1.unsqueeze(0).unsqueeze(0)
+                    * self.mixer(self.norm1(x))) # forward Attention: dim -> dim.
+                x = x + self.drop_path(
+                    self.layer_scale_2.unsqueeze(0).unsqueeze(0)
+                    * self.mlp(self.norm2(x))) # forward MLP: 
+            else:
+                x = x + self.drop_path(self.mixer(self.norm1(x)))
+                x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x
+        elif self.mixer_type == 'graph':
+            x = x + self.drop_path(self.mixer(x))
+            return x
         else:
-            x = x + self.drop_path(self.mixer(self.norm1(x)))
-            x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x
+            raise NotImplementedError(f'{self.mode} is not implemented in TransBlock.forward')
     
     def forward_cross(self,x,len):
         part_size = len
@@ -150,8 +160,6 @@ class TransBlock(nn.Module):
 
 
 class DSTFormerBlock(nn.Module):
-
-
     def __init__(self, dim, mlp_ratio=4., act_layer=nn.GELU, attn_drop=0., drop=0., drop_path=0.,
                  num_heads=8, use_layer_scale=True, qkv_bias=False, qk_scale=None, layer_scale_init_value=1e-5,
                  use_adaptive_fusion=True, hierarchical=False, use_temporal_similarity=True,
@@ -179,7 +187,7 @@ class DSTFormerBlock(nn.Module):
         self.graph_spatial = TransBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
                                                qkv_bias,
                                                qk_scale, use_layer_scale, layer_scale_init_value,
-                                               mode='temporal', mixer_type="attention",
+                                               mode='spatial', mixer_type="graph",
                                                use_temporal_similarity=use_temporal_similarity,
                                                temporal_connection_len=temporal_connection_len,
                                                neighbour_num=neighbour_num,
@@ -187,7 +195,7 @@ class DSTFormerBlock(nn.Module):
         self.graph_temporal = TransBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
                                                 qkv_bias,
                                                 qk_scale, use_layer_scale, layer_scale_init_value,
-                                                mode='spatial', mixer_type='attention',
+                                                mode='temporal', mixer_type='attention',
                                                 use_temporal_similarity=use_temporal_similarity,
                                                 temporal_connection_len=temporal_connection_len,
                                                 neighbour_num=neighbour_num,
