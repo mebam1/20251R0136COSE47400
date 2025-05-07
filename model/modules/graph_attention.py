@@ -55,10 +55,13 @@ class BatchedCachedGraph():
             return BatchedCachedGraph(bone_graph)
 
 
+j_graph=BatchedCachedGraph.build_human_graph('joint')
+b_graph=BatchedCachedGraph.build_human_graph('bone')
+
 class RGAT(nn.Module):
-    def __init__(self, dim, joint_or_bone:str, use_GATv2:bool=True, appnp_iter:int=8, drop:float=0.0):
+    def __init__(self, dim, j_or_e, use_GATv2:bool=True, appnp_iter:int=1, drop:float=0.0):
         super().__init__()
-        self.human_graph = BatchedCachedGraph.build_human_graph(joint_or_bone)
+        self.human_graph = j_or_e
         self.appnp1 = GATAppnp(dim, use_GATv2, appnp_iter)
         self.norm = nn.LayerNorm(dim)
         self.mlp = MLP(dim, 4*dim, dim, drop=drop)
@@ -75,14 +78,14 @@ class RGAT(nn.Module):
         return x
 
 class SpatialAttention(nn.Module):
-    def __init__(self, in_dim:int, out_dim:int|None, use_GATv2:bool=True, appnp_iter:int=8, drop:float=0.0):
+    def __init__(self, in_dim:int, out_dim:int|None, use_GATv2:bool=True, appnp_iter:int=1, drop:float=0.0):
         super().__init__()
         out_dim = out_dim or in_dim
         self.spatial = nn.Sequential(
-            RGAT(in_dim, 'joint', drop=drop),
+            RGAT(in_dim, j_graph, drop=drop),
             nn.LayerNorm(in_dim),
             MLP(in_dim, out_dim * 2, out_dim),
-            RGAT(out_dim, 'joint', drop=drop)
+            RGAT(out_dim, j_graph, drop=drop)
         )
 
     def forward(self, x: torch.Tensor):
@@ -92,10 +95,10 @@ class SpatialAttention(nn.Module):
 
 class GATAppnp(nn.Module):
 
-    def __init__(self, dim:int, use_GATv2:bool, appnp_iter:int=8):
+    def __init__(self, dim:int, use_GATv2:bool, appnp_iter:int=1):
         assert(appnp_iter >= 1), 'appnp_iter must be < 1'
         super().__init__()
-        self.conv = GAT(dim, dim, num_layers=2, dropout=0.25, act='gelu', v2=use_GATv2, concat=False, heads=3)
+        self.conv = GAT(dim, dim, num_layers=1, dropout=0.25, act='gelu', v2=use_GATv2, concat=False, heads=1)
         self.alpha=nn.Linear(dim, 1) # node-wise alpha predictor
         self.k = appnp_iter
         self.norm = nn.LayerNorm(dim)
@@ -110,7 +113,6 @@ class GATAppnp(nn.Module):
         skip_rate = F.sigmoid(a)
 
         x = self.conv(x, edges)
-
         for _ in range(self.k):
             x = (1.0 - skip_rate) * self.conv(x, edges) + skip_rate * x0
         return x
