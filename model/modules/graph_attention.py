@@ -56,23 +56,20 @@ class BatchedCachedGraph():
 
 
 j_graph=BatchedCachedGraph.build_human_graph('joint')
-b_graph=BatchedCachedGraph.build_human_graph('bone')
+#b_graph=BatchedCachedGraph.build_human_graph('bone')
 
 class RGAT(nn.Module):
     def __init__(self, dim, j_or_e, use_GATv2:bool=True, appnp_iter:int=1, drop:float=0.0):
         super().__init__()
         self.human_graph = j_or_e
-        self.appnp1 = GATAppnp(dim, use_GATv2, appnp_iter)
-        self.norm = nn.LayerNorm(dim)
-        self.mlp = MLP(dim, 4*dim, dim, drop=drop)
+        self.appnp1 = GATAppnp(dim, use_GATv2)
+        #self.norm = nn.LayerNorm(dim)
+        #self.mlp = MLP(dim, 4*dim, dim, drop=drop)
 
     def forward(self, x: torch.Tensor):
         B,T,J,C = x.shape
         x = x.view(-1, C)
         x2 = self.appnp1(x, self.human_graph)
-        x = x + x2
-        x2 = self.norm(x2)
-        x2 = self.mlp(x2)
         x = x + x2
         x = x.view(B,T,J,C)
         return x
@@ -95,12 +92,10 @@ class SpatialAttention(nn.Module):
 
 class GATAppnp(nn.Module):
 
-    def __init__(self, dim:int, use_GATv2:bool, appnp_iter:int=1):
-        assert(appnp_iter >= 1), 'appnp_iter must be < 1'
+    def __init__(self, dim:int, use_GATv2:bool):
         super().__init__()
         self.conv = GAT(dim, dim, num_layers=1, dropout=0.25, act='gelu', v2=use_GATv2, concat=False, heads=1)
-        self.alpha=nn.Linear(dim, 1) # node-wise alpha predictor
-        self.k = appnp_iter
+        self.alpha=nn.Parameter(torch.tensor(-0.1))  #nn.Linear(dim, 1)
         self.norm = nn.LayerNorm(dim)
 
     def forward(self, x:torch.Tensor, batched_graph:BatchedCachedGraph):
@@ -109,11 +104,11 @@ class GATAppnp(nn.Module):
         edges = batched_graph.get_batched_edge_index(x.shape[0] // batched_graph.num_nodes)
         x0 = x
         x = self.norm(x)
-        a = self.alpha(x)
+        a = self.alpha
         skip_rate = F.sigmoid(a)
 
         x = self.conv(x, edges)
-        for _ in range(self.k):
+        for _ in range(3):
             x = (1.0 - skip_rate) * self.conv(x, edges) + skip_rate * x0
         return x
 
