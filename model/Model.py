@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.modules.attention import Attention
 from model.modules.mlp import MLP
 from model.modules.crossattention import CrossAttention
-from model.modules.graph_attention import SpatialAttention
+from model.modules.graph_attention import SpatialBlock
 from model.modules.ModelBlock import MIBlock
 os.environ['CUDA_VISIBLE_DEVICES'] = '0' 
 
@@ -57,7 +57,7 @@ class TransBlock(nn.Module):
             self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop,
                                    proj_drop=drop, mode=mode)
         elif mixer_type == 'graph':
-            self.mixer = SpatialAttention(dim, dim, True, 8, drop=drop)
+            self.mixer = SpatialBlock(dim, 2, drop=drop)
         self.norm2 = nn.LayerNorm(dim)
 
         mlp_hidden_dim = int(dim * mlp_ratio)
