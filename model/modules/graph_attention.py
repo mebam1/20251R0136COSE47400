@@ -72,6 +72,8 @@ class SpatialBlock(nn.Module):
         self.upscale_to_bone = nn.Linear(j_graph.num_nodes, b_graph.num_nodes)
         self.downscale_to_joint = nn.Linear(b_graph.num_nodes, j_graph.num_nodes)
 
+        self.fusion = nn.Linear(2*dim, 2)
+
         self.norm = nn.LayerNorm(dim)
         self.mlp_out = MLP(dim, int(dim * mlp_ratio), dim, drop=drop)
 
@@ -85,10 +87,10 @@ class SpatialBlock(nn.Module):
         bone = bone.transpose(3, 2)
         bone = F.gelu(self.downscale_to_joint(bone))
         bone = bone.transpose(3, 2)
-
         joint = self.sj(x)
+        a = F.softmax(self.fusion(torch.cat([joint, bone], dim=-1)), dim=-1)
 
-        x = x + joint + bone
+        x = x + a[..., 0:1] * joint + a[..., 1:2] * bone
         x = x + self.mlp_out(self.norm(x))
         return x
 
@@ -97,7 +99,7 @@ class GATAppnp(nn.Module):
         super().__init__()
         self.alpha = nn.Linear(dim, 1)
         nn.init.xavier_normal_(self.alpha.weight.data)
-        nn.init.normal_(self.alpha.bias.data, mean=-2.0, std=0.5)
+        nn.init.xavier_normal_(self.alpha.bias.data)
         self.norm = nn.LayerNorm(dim)
         self.conv = GAT(dim)
         self.n_iter = n_iter
@@ -190,7 +192,7 @@ def test_spatial_graph_attention():
     # Initialize model
     B, T, J, C = 8, 81, 17, 512
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = SpatialBlock(dim=C, drop=0.5)
+    model = nn.Sequential(*[SpatialBlock(dim=C, drop=0.5) for _ in range(16)])
     model.to(device)
     
     # Test forward pass
@@ -198,6 +200,8 @@ def test_spatial_graph_attention():
     show_mem(f"before ---")
     output = model(x)
     show_mem(f"after ---")
+
+    print(output[0,0,0])
     assert not torch.allclose(output, x), "Model not modifying input"
 
 if __name__ == '__main__':
