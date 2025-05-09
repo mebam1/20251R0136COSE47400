@@ -57,7 +57,7 @@ class TransBlock(nn.Module):
             self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop,
                                    proj_drop=drop, mode=mode)
         elif mixer_type == 'graph':
-            self.mixer = SpatialBlock(dim, 2, drop=drop)
+            self.mixer = SpatialBlock(dim, drop=drop)
         self.norm2 = nn.LayerNorm(dim)
 
         mlp_hidden_dim = int(dim * mlp_ratio)
