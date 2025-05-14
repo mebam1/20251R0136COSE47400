@@ -63,3 +63,28 @@ class Attention(nn.Module):
         x = attn @ vt  # (B, H, J, T, C)
         x = x.permute(0, 3, 2, 1, 4).reshape(B, T, J, C * self.num_heads)
         return x  # (B, T, J, C)
+
+
+
+def show_mem(tag=""):
+    torch.cuda.synchronize()
+    alloc = torch.cuda.memory_allocated() / 1024**2
+    reserv = torch.cuda.memory_reserved() / 1024**2
+    print(f"[{tag}] allocated = {alloc:.1f} MB | reserved = {reserv:.1f} MB")
+
+def test_spatial_graph_attention():
+    # Initialize model
+    B, T, J, C = 8, 81, 17, 512
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = nn.Sequential(*[Attention(C, C, mode='spatial') for _ in range(16)])
+    model.to(device)
+    
+    # Test forward pass
+    x = torch.randn(B, T, J, C, device=device)
+    show_mem(f"before ---")
+    output = model(x)
+    show_mem(f"after ---")
+    assert not torch.allclose(output, x), "Model not modifying input"
+
+if __name__ == '__main__':
+    test_spatial_graph_attention()

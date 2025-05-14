@@ -1,13 +1,14 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from model.modules.mlp import MLP
-from torch.utils.checkpoint import checkpoint
+import torch.sparse as S
+import torch.autograd.profiler as profiler
 
 class CachedGraph():
-    def __init__(self, adj:torch.Tensor, num_nodes:int):
+    @torch.no_grad()
+    def __init__(self, edge_index:torch.Tensor, num_nodes:int):
         self.num_nodes = num_nodes
-        self.adj = adj
+        self.edge_index = edge_index
 
     @staticmethod
     @torch.no_grad()
@@ -17,164 +18,158 @@ class CachedGraph():
         device ='cuda' if torch.cuda.is_available() else 'cpu'
 
         if joint_or_bone == 'joint':
-            h36m_joint_edge_tensor = torch.tensor([
+            # H36M Joint structure
+            x = torch.tensor([
                 [
                     0,0,0,1,1,2,2,3,4,4,5,5,6,7,7,8,8,8,8,9,9,10,11,11,12,12,13,14,14,15,15,16
                 ],
                 [
                     1,4,7,0,2,1,3,2,0,5,4,6,5,0,8,7,9,11,14,8,10,9,8,12,11,13,12,8,15,14,16,15
                 ]
-                ], device=device, dtype=torch.int)
-            adj = torch.zeros((17, 17), device=device, dtype=torch.bool)
-            adj[h36m_joint_edge_tensor[0], h36m_joint_edge_tensor[1]] = True
-            adj[h36m_joint_edge_tensor[1], h36m_joint_edge_tensor[0]] = True
-            adj.fill_diagonal_(True)
-            return CachedGraph(adj, 17)
+                ], device=device, dtype=torch.int64)
+            
+            #x = x[:, (x[0] < x[1])]
+            
+            x = torch.cat([x, torch.arange(0, 17, step=1,device=device, dtype=torch.int64).expand(2, -1)], dim=1)
+            return CachedGraph(x, 17)
         else:
-            bone_edge_tensor = torch.tensor([
+            # Human Bone structure (DSTFormer)
+            x = torch.tensor([
                 [
                     0,0,0,1,1,2,3,3,3,4,4,5,6,6,6,7,7,7,7,8,8,8,8,9,10,10,10,10,11,11,12,13,13,13,13,14,14,15
                 ],
                 [
                     1,3,6,0,2,1,0,4,6,3,5,4,0,3,7,6,8,10,13,7,9,10,13,8,7,8,11,13,10,12,11,7,8,10,14,13,15,14
                 ]
-                ], device=device, dtype=torch.int)
-            adj = torch.zeros((16, 16), device=device, dtype=torch.bool)
-            adj[bone_edge_tensor[0], bone_edge_tensor[1]] = True
-            adj[bone_edge_tensor[1], bone_edge_tensor[0]] = True
-            adj.fill_diagonal_(True)
-            return CachedGraph(adj, 16)
+                ], device=device, dtype=torch.int64)
+            #x = x[:, (x[0] < x[1])]
+            x = torch.cat([x, torch.arange(0, 16, step=1,device=device, dtype=torch.int64).expand(2, -1)], dim=1)
+            return CachedGraph(x, 16)
 
 j_graph=CachedGraph.build_human_graph('joint')
 b_graph=CachedGraph.build_human_graph('bone')
 
-class SpatialAPPNP(nn.Module):
-    def __init__(self, dim:int, j_or_e:CachedGraph, appnp_iter:int, checkpoint_length:int=0, drop:float=0.0):
+
+
+class GATAPPNP(nn.Module):
+    def __init__(self, dim:int, appnp_iter:int=4, mlp_ratio:float=4.0, drop:float=0.0):
         super().__init__()
-        self.human_graph = j_or_e
-        self.appnp1 = GATBlock(dim, appnp_iter, checkpoint_length=checkpoint_length)
-        self.drop = nn.Dropout(drop)
-
-    def forward(self, x: torch.Tensor):
-        # B * T are spatial batch dimension.
-        # Consider x.shape: [B, T, J, C].
-        x = self.drop(self.appnp1(x, self.human_graph))
-        return x
-
-class SpatialBlock(nn.Module):
-    def __init__(self, dim, appnp_iter:int=4, use_grad_checkpont:bool=True, mlp_ratio:float=4.0, drop:float=0.0):
-        super().__init__()
-        len_ckpt = appnp_iter // 4 if use_grad_checkpont else 0
-        self.sj = SpatialAPPNP(dim, j_graph, appnp_iter=appnp_iter, checkpoint_length=len_ckpt , drop=drop)
-
-        self.sb = SpatialAPPNP(dim, b_graph, appnp_iter=appnp_iter, checkpoint_length=len_ckpt, drop=drop)
         self.upscale_to_bone = nn.Linear(j_graph.num_nodes, b_graph.num_nodes)
         self.downscale_to_joint = nn.Linear(b_graph.num_nodes, j_graph.num_nodes)
+        self.alpha = nn.Sequential(
+            nn.Linear(2*dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, 2)
+        )
 
-        self.fusion = nn.Linear(2*dim, 2)
-
-        self.norm = nn.LayerNorm(dim)
-        self.mlp_out = MLP(dim, int(dim * mlp_ratio), dim, drop=drop)
+        self.bone_gat = SkipableGAT(dim, appnp_iter, drop=drop)
+        self.joint_gat = SkipableGAT(dim, appnp_iter, drop=drop)
 
     def forward(self, x: torch.Tensor):
-        #B,T,J,C = x.shape
-        
-        bone:torch.Tensor = x.transpose(3, 2)
-        bone = F.gelu(self.upscale_to_bone(bone))
-        bone = bone.transpose(3, 2) # shape: [B, T, J+1, C], bone dimension = joint + 1
-        bone = self.sb(bone)
-        bone = bone.transpose(3, 2)
-        bone = F.gelu(self.downscale_to_joint(bone))
-        bone = bone.transpose(3, 2)
-        joint = self.sj(x)
-        a = F.softmax(self.fusion(torch.cat([joint, bone], dim=-1)), dim=-1)
-
-        x = a[..., 0:1] * joint + a[..., 1:2] * bone
-        x = x + self.mlp_out(self.norm(x))
+        bone = self.bone_forward(x)
+        joint = self.joint_gat(x, j_graph)
+        fusion_rate = F.softmax(self.alpha(torch.cat([bone, joint], dim=-1)), dim=-1)
+        x = fusion_rate[..., 0:1] * bone + fusion_rate[..., 1:2] * joint
         return x
+    
+    def bone_forward(self, x: torch.Tensor):
+        residual = x
+        x = self.upscale_to_bone(x.transpose(2, 3)).transpose(2, 3) # [B,T,J + 1,C]
+        x = self.bone_gat(x, b_graph)
+        x = self.downscale_to_joint(x.transpose(2, 3)).transpose(2, 3) # [B,T,J,C]
+        return x + residual
 
-class GATBlock(nn.Module):
-    def __init__(self, dim:int, n_iter:int, checkpoint_length:int=0):
+
+
+class SkipableGAT(nn.Module):
+    def __init__(self, dim:int, n_iter:int, drop:float=0.0):
         super().__init__()
-        self.alpha = nn.ModuleList([nn.Linear(dim, 1) for i in range(n_iter)])
-        self.norm = nn.ModuleList([nn.LayerNorm(dim) for i in range(n_iter)])
-        self.linear = nn.ModuleList([MLP(dim, 4*dim, dim) for i in range(n_iter)])
-        self.conv = nn.ModuleList([GAT(dim) for i in range(n_iter)])
+        '''
+        self.alpha = nn.ModuleList([nn.Sequential(
+            nn.Linear(2*dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, 2)
+        )
+        for _ in range(n_iter)])
+        self.norm = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_iter)])
+        self.conv = nn.ModuleList([GAT(dim, dim) for _ in range(n_iter)])
+        '''
+        
         self.n_iter = n_iter
-        self.checkpoint_length = checkpoint_length or 0
-        self.n_ckpt_iter = n_iter // checkpoint_length if self.checkpoint_length > 0 else 0
+        self.norm = nn.LayerNorm(dim)
+        self.norm_init = nn.LayerNorm(dim)
+        scale = 1
+        self.conv = GAT(dim // scale, dim // scale)
+        self.alpha = nn.Sequential(nn.Linear(dim, dim), nn.ReLU(), nn.Linear(dim, 2))
+        self.down_scale = nn.Linear(dim, dim // scale, bias=False)
+        self.up_scale = nn.Linear(dim // scale, dim, bias=False)
+        self.proj = nn.Linear(dim, dim)
+        self.drop = nn.Dropout(drop)
+
 
     def forward(self, x:torch.Tensor, g:CachedGraph):
         # B * T are spatial batch dimension.
         # Consider x.shape: [B, T, J, C].
-        x0 = x
-        if self.checkpoint_length > 0:
-            for _ in range(self.checkpoint_length):
-                x = checkpoint(self.appnp_loop, x, x0, g, self.n_ckpt_iter, use_reentrant=False)
-        else:
-            x = self.appnp_loop(x, x0, g, self.n_iter)
-        return x
-    
-    def single_step(self, x:torch.Tensor, x0:torch.Tensor, g:CachedGraph, i:int):
-            x = self.linear[i](x)
-            x = self.norm[i](x)
-            skip_rate = F.sigmoid(self.alpha[i](x))
-            x = (1.0 - skip_rate) * self.conv[i](x, g) + skip_rate * x0
-            return x
-    
-    def appnp_loop(self, x:torch.Tensor, x0:torch.Tensor, g:CachedGraph, iter:int):
-        for i in range(iter):
-            x = self.single_step(x, x0, g, i)
-        return x
+        x0 = self.norm_init(x)
+
+        for i in range(self.n_iter):
+            x = self.norm(x)
+            x = self.conv(x, g)
+            #skip_rate = F.softmax(self.alpha(x + x0), dim=-1)
+            #x = skip_rate[..., 0:1] * x0 + skip_rate[..., 1:2] * self.drop(self.up_scale(self.conv(self.down_scale(x), g)))
+
+        return self.proj(x)
+
 
 class GAT(nn.Module):
-    def __init__(self, dim:int, n_heads: int = 2):
+    def __init__(self, dim_in:int, dim_out:int, n_heads: int = 8, qkv_bias=False):
         super().__init__()
-        assert dim % n_heads == 0, "dim must be divisible by n_heads"
-        self.dim_h = dim // n_heads
+        assert dim_in % n_heads == 0, "dim_in must be divisible by n_heads"
+        self.dim_h = dim_in // n_heads
         self.h = n_heads
-        self.w1 = nn.Linear(dim, 2*dim)
-        self.w2 = nn.Linear(dim, 2*dim)
-        self.act1 = nn.LeakyReLU(0.2)
-        self.proj_to_score = nn.Linear(2*self.dim_h,1)
-        self.v = nn.Linear(dim, dim)
-        self.act2 = nn.GELU()
-        #nn.init.xavier_uniform_(self.w1.weight.data)
-        #nn.init.xavier_uniform_(self.w1.bias.data)
-
-
+        #self.qk_scale = self.dim_h ** -0.5 # 1 / sqrt(dH)
+        self.w_qkv = nn.Linear(dim_in, 5*dim_in, bias=qkv_bias) # (2C + 2C + C)
+        self.a = nn.Linear(2*self.dim_h, 1, bias=False)
+        self.proj = nn.Linear(dim_in, dim_out)
+        self.relu_ = nn.ReLU(inplace=True)
+    
     def forward(self, x:torch.Tensor, g:CachedGraph):
-        # B * T are spatial batch dimension.
-        # Consider x.shape: [B, T, J, C].
         B, T, J, C = x.shape
-        attn_mask = (g.adj == 0) # mask which considers human structure
+        # Let start_node[i] = start node of i-th edge.
 
-        l = self.w1(x)
-        r = self.w2(x)
-        l = l.view(B, T, J, self.h, 2 * self.dim_h)
-        r = r.view(B, T, J, self.h, 2 * self.dim_h)
+        start_node, end_node = g.edge_index[0], g.edge_index[1]
+        qkv:torch.Tensor = self.w_qkv(x)
+        qkv = qkv.view(B,T,J,self.h,5*self.dim_h).transpose(2, 3) # [B,T,J,H,5dH]
 
-        l = l.transpose(2, 3) # shape: [B, T, H, J, 2dH]
-        l = l.unsqueeze(4) # shape: [B, T, H, J, 1, 2dH]
+        
+        q, k, v = qkv[..., :2*self.dim_h], qkv[..., 2*self.dim_h:4*self.dim_h], qkv[..., 4*self.dim_h:]
+        
+        with profiler.record_function("!Optim1"):
+            qe = q.index_select(dim=2, index=start_node) # [B,T,E,H,2dH]
+            print(qe.shape)
+            quit()
+        ke = k.index_select(dim=2, index=end_node)
+        ve = v.index_select(dim=2, index=end_node)
 
-        r = r.transpose(2, 3)
-        r = r.unsqueeze(3) # shape: [B, T, H, 1, J, 2dH]        
+        z = F.leaky_relu_(qe + ke, negative_slope=0.2)
+        z = self.a(z) # [B,T,H,E]
+        z = z.squeeze(-1)
+        z = torch.exp(z - torch.max(z, dim=-1, keepdim=True).values)
+        sigma = x.new_zeros(B,T,self.h,J)
+        sigma.index_add_(dim=-1, index=start_node, source=z)
+        attn = z / sigma[..., start_node] # [B,T,H,E]
 
-        s = self.act1(l+r) # shape: [B, T, H, J, J, 2dH]     
+        with profiler.record_function("!Optim2."):
+            attn.unsqueeze_(-1)
+            weighted_v = attn * ve # [B,T,H,E,dH]
 
-        s = self.proj_to_score(s) # [B, T, H, J, J, 1]
-        s = s.squeeze(-1) # [B, T, H, J, J]
-        s = s.masked_fill(attn_mask, -1e9)
-        s = F.softmax(s, dim=-1) # [B, T, H, J, J]
+        out = x.new_zeros(B,T,self.h,J,self.dim_h)
+        out.index_add_(dim=-2, index=start_node, source=weighted_v)
+        out.transpose_(2, 3)
+        out = out.view(B,T,J,C)
+        out = self.proj(out)
+        return F.relu_(out)
 
-        x = self.v(x) # shape: [B, T, J, C]
-        x = x.view(B, T, J, self.h, self.dim_h)
-        x = x.transpose(2, 3) # shape: [B, T, H, J, dH]
-        x = s @ x # shape: [B, T, H, J, dH]
-        x = self.act2(x)
-        x = x.transpose(2, 3) # shape: [B, T, J, H, dH]
-        x = x.reshape(B, T, J, C)
-        return x
 
 
 #==================#
@@ -186,20 +181,36 @@ def show_mem(tag=""):
     alloc = torch.cuda.memory_allocated() / 1024**2
     reserv = torch.cuda.memory_reserved() / 1024**2
     print(f"[{tag}] allocated = {alloc:.1f} MB | reserved = {reserv:.1f} MB")
+    print(tag)
 
-def test_spatial_graph_attention():
-    # Initialize model
+def profile_gat():
     B, T, J, C = 8, 81, 17, 512
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = nn.Sequential(*[SpatialBlock(dim=C, drop=0.5) for _ in range(16)])
+    model = GAT(C,C,1)
     model.to(device)
-    
     # Test forward pass
     x = torch.randn(B, T, J, C, device=device)
-    show_mem(f"before ---")
-    output = model(x)
-    show_mem(f"after ---")
-    assert not torch.allclose(output, x), "Model not modifying input"
+    sort_by = 'cuda_memory_usage'
+    with profiler.profile(with_stack=True, 
+                          profile_memory=True, 
+                          use_device='cuda',
+                          experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True)) as prof:
+        x = model(x, j_graph)
+    torch.cuda.synchronize()
+    print(prof.key_averages(group_by_stack_n=8).table(sort_by=sort_by, row_limit=10))
+    
+
+def test_many_modules():
+    B, T, J, C = 8, 81, 17, 512
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = nn.ModuleList([GAT(C, C, 1, False) for _ in range(16)])
+    model.to(device)
+
+    x = torch.randn(B, T, J, C, device=device)
+    show_mem('---before---')
+    for m in model:
+        x = m(x, j_graph)
+    show_mem('---after---')
 
 if __name__ == '__main__':
-    test_spatial_graph_attention()
+    profile_gat()
