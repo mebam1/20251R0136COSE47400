@@ -72,7 +72,7 @@ class SkipableGAT(nn.Module):
         if self.training and self.use_checkpoint:
             return checkpoint(self._forward_impl, x, use_reentrant=False)
         else:
-            return self.forward_impl(x)
+            return self._forward_impl(x)
 
     
     def _forward_impl(self, x:torch.Tensor):
