@@ -424,11 +424,7 @@ class MemoryInducedTransformer(nn.Module):
         x = self.joints_embed(x)  #
         x = x + self.pos_embed
 
-        for layer,temporal_layer in zip(self.layers,self.temporal_layers):
-            if self.training:
-                x, pose_query = checkpoint(self.forward_one_layer, x, layer, temporal_layer, pose_query, use_reentrant=False)
-            else:
-                x, pose_query = self.forward_one_layer(x, layer, temporal_layer, pose_query)
+        x, pose_query = self.forward_layers(x, pose_query)
 
         x = self.norm(x)
         x = self.rep_logit(x)
@@ -442,6 +438,27 @@ class MemoryInducedTransformer(nn.Module):
     def forward_one_layer(self, x, layer, tlayer, pose_query):
         x = layer(x)
         return tlayer(x, pose_query)
+
+    def forward_layers(self, x, pose_query):
+        L = len(self.layers)
+        if True:
+            return self.forward_one_group(x, pose_query, 0, L)
+        
+        GROUP_COUNT = 2
+        assert L % GROUP_COUNT == 0, 'Layer Count % \GROUP_COUNT != 0'
+        GROUP_SIZE = L // GROUP_COUNT
+        for group in range(GROUP_COUNT):
+            x, pose_query = checkpoint(self.forward_one_group, x, pose_query, GROUP_SIZE * group, GROUP_SIZE, use_reentrant=False)
+            
+        return x, pose_query
+
+    def forward_one_group(self, x, pose_query, start, group_size):
+        for i in range(group_size):
+            j = start + i
+            layer, temporal_layer = self.layers[j], self.temporal_layers[j]
+            x, pose_query = self.forward_one_layer(x, layer, temporal_layer, pose_query)
+        return x, pose_query
+
 
 
 def _test():

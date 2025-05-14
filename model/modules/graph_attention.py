@@ -58,14 +58,14 @@ class SkipableGAT(nn.Module):
         self.use_checkpoint = use_checkpoint
         self.norm1 = nn.LayerNorm(dim)
         self.j_conv = nn.Sequential(nn.Linear(dim, gat_dim), GAT(gat_dim, gat_dim, mode='joint'), nn.Linear(gat_dim, dim))
-        self.j_alpha = nn.Sequential(nn.Linear(dim, 2), nn.Softmax(dim=-1))
+        self.j_alpha = nn.Sequential(nn.Linear(dim, gat_dim), nn.LeakyReLU(0.2, inplace=True), nn.Linear(gat_dim, 2), nn.Softmax(dim=-1))
         self.drop1 = nn.Dropout(drop)
 
         self.norm2 = nn.LayerNorm(dim)
         self.to_bone = nn.Linear(j_graph.num_nodes, b_graph.num_nodes)
         self.to_joint = nn.Linear(b_graph.num_nodes, j_graph.num_nodes)
         self.b_conv = nn.Sequential(nn.Linear(dim, gat_dim), GAT(gat_dim, gat_dim, mode='bone'), nn.Linear(gat_dim, dim))
-        self.b_alpha = nn.Sequential(nn.Linear(dim, 2), nn.Softmax(dim=-1))
+        self.b_alpha = nn.Sequential(nn.Linear(dim, gat_dim), nn.LeakyReLU(0.2, inplace=True), nn.Linear(gat_dim, 2), nn.Softmax(dim=-1))
         self.drop2 = nn.Dropout(drop)
 
     def forward(self, x:torch.Tensor):
