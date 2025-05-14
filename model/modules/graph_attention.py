@@ -1,8 +1,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torch.sparse as S
+from torch.utils.checkpoint import checkpoint
 import torch.autograd.profiler as profiler
+
 
 class CachedGraph():
     @torch.no_grad()
@@ -26,7 +27,7 @@ class CachedGraph():
                 [
                     1,4,7,0,2,1,3,2,0,5,4,6,5,0,8,7,9,11,14,8,10,9,8,12,11,13,12,8,15,14,16,15
                 ]
-                ], device=device, dtype=torch.int64)
+                ], device=device, dtype=torch.long)
             
             #x = x[:, (x[0] < x[1])]
             
@@ -41,7 +42,7 @@ class CachedGraph():
                 [
                     1,3,6,0,2,1,0,4,6,3,5,4,0,3,7,6,8,10,13,7,9,10,13,8,7,8,11,13,10,12,11,7,8,10,14,13,15,14
                 ]
-                ], device=device, dtype=torch.int64)
+                ], device=device, dtype=torch.long)
             #x = x[:, (x[0] < x[1])]
             x = torch.cat([x, torch.arange(0, 16, step=1,device=device, dtype=torch.int64).expand(2, -1)], dim=1)
             return CachedGraph(x, 16)
@@ -49,126 +50,98 @@ class CachedGraph():
 j_graph=CachedGraph.build_human_graph('joint')
 b_graph=CachedGraph.build_human_graph('bone')
 
-
-
-class GATAPPNP(nn.Module):
-    def __init__(self, dim:int, appnp_iter:int=4, mlp_ratio:float=4.0, drop:float=0.0):
+class SkipableGAT(nn.Module):
+    def __init__(self, dim:int, bottle_neck:int=2, drop:float=0.0, use_checkpoint=True):
         super().__init__()
-        self.upscale_to_bone = nn.Linear(j_graph.num_nodes, b_graph.num_nodes)
-        self.downscale_to_joint = nn.Linear(b_graph.num_nodes, j_graph.num_nodes)
-        self.alpha = nn.Sequential(
-            nn.Linear(2*dim, dim),
-            nn.ReLU(),
-            nn.Linear(dim, 2)
-        )
+        assert dim % bottle_neck == 0, f"(dim={dim}) must be divisible by (bottleneck={bottle_neck})."
+        gat_dim = dim // bottle_neck
+        self.use_checkpoint = use_checkpoint
+        self.norm1 = nn.LayerNorm(dim)
+        self.j_conv = nn.Sequential(nn.Linear(dim, gat_dim), GAT(gat_dim, gat_dim, mode='joint'), nn.Linear(gat_dim, dim))
+        self.j_alpha = nn.Sequential(nn.Linear(dim, 2), nn.Softmax(dim=-1))
+        self.drop1 = nn.Dropout(drop)
 
-        self.bone_gat = SkipableGAT(dim, appnp_iter, drop=drop)
-        self.joint_gat = SkipableGAT(dim, appnp_iter, drop=drop)
+        self.norm2 = nn.LayerNorm(dim)
+        self.to_bone = nn.Linear(j_graph.num_nodes, b_graph.num_nodes)
+        self.to_joint = nn.Linear(b_graph.num_nodes, j_graph.num_nodes)
+        self.b_conv = nn.Sequential(nn.Linear(dim, gat_dim), GAT(gat_dim, gat_dim, mode='bone'), nn.Linear(gat_dim, dim))
+        self.b_alpha = nn.Sequential(nn.Linear(dim, 2), nn.Softmax(dim=-1))
+        self.drop2 = nn.Dropout(drop)
 
-    def forward(self, x: torch.Tensor):
-        bone = self.bone_forward(x)
-        joint = self.joint_gat(x, j_graph)
-        fusion_rate = F.softmax(self.alpha(torch.cat([bone, joint], dim=-1)), dim=-1)
-        x = fusion_rate[..., 0:1] * bone + fusion_rate[..., 1:2] * joint
+    def forward(self, x:torch.Tensor):
+        if self.training and self.use_checkpoint:
+            return checkpoint(self._forward_impl, x, use_reentrant=False)
+        else:
+            return self.forward_impl(x)
+
+    
+    def _forward_impl(self, x:torch.Tensor):
+        # Consider x.shape: [B, T, J, C].
+        x = self.norm1(x)
+        x0 = x
+        x = self.joint_forward(x, x0)
+        x = self.bone_forward(x, x0)
         return x
     
-    def bone_forward(self, x: torch.Tensor):
-        residual = x
-        x = self.upscale_to_bone(x.transpose(2, 3)).transpose(2, 3) # [B,T,J + 1,C]
-        x = self.bone_gat(x, b_graph)
-        x = self.downscale_to_joint(x.transpose(2, 3)).transpose(2, 3) # [B,T,J,C]
-        return x + residual
+    def joint_forward(self, x:torch.Tensor, x0:torch.Tensor):
+        x = self.j_conv(x)
+        x = self.drop1(x)
+        skip_rate = self.j_alpha(x + x0)
+        x = skip_rate[..., 0:1] * x0 + skip_rate[..., 1:2] * x
+        return x
+    
+    def bone_forward(self, x:torch.Tensor, x0:torch.Tensor):
+        x = x.transpose(2, 3) # [B,T,C,J]
+        x = self.to_bone(x)
+        x = x.transpose(2, 3)
+        x = self.norm2(x)
+        x = self.b_conv(x)
+        x = x.transpose(2, 3)
+        x = self.to_joint(x)
+        x = x.transpose(2, 3)
+        x = self.drop2(x)
+        skip_rate = self.b_alpha(x + x0)
+        x = skip_rate[..., 0:1] * x0 + skip_rate[..., 1:2] * x
+        return x
 
 
-
-class SkipableGAT(nn.Module):
-    def __init__(self, dim:int, n_iter:int, drop:float=0.0):
-        super().__init__()
-        '''
-        self.alpha = nn.ModuleList([nn.Sequential(
-            nn.Linear(2*dim, dim),
-            nn.ReLU(),
-            nn.Linear(dim, 2)
-        )
-        for _ in range(n_iter)])
-        self.norm = nn.ModuleList([nn.LayerNorm(dim) for _ in range(n_iter)])
-        self.conv = nn.ModuleList([GAT(dim, dim) for _ in range(n_iter)])
-        '''
-        
-        self.n_iter = n_iter
-        self.norm = nn.LayerNorm(dim)
-        self.norm_init = nn.LayerNorm(dim)
-        scale = 1
-        self.conv = GAT(dim // scale, dim // scale)
-        self.alpha = nn.Sequential(nn.Linear(dim, dim), nn.ReLU(), nn.Linear(dim, 2))
-        self.down_scale = nn.Linear(dim, dim // scale, bias=False)
-        self.up_scale = nn.Linear(dim // scale, dim, bias=False)
-        self.proj = nn.Linear(dim, dim)
-        self.drop = nn.Dropout(drop)
-
-
-    def forward(self, x:torch.Tensor, g:CachedGraph):
-        # B * T are spatial batch dimension.
-        # Consider x.shape: [B, T, J, C].
-        x0 = self.norm_init(x)
-
-        for i in range(self.n_iter):
-            x = self.norm(x)
-            x = self.conv(x, g)
-            #skip_rate = F.softmax(self.alpha(x + x0), dim=-1)
-            #x = skip_rate[..., 0:1] * x0 + skip_rate[..., 1:2] * self.drop(self.up_scale(self.conv(self.down_scale(x), g)))
-
-        return self.proj(x)
 
 
 class GAT(nn.Module):
-    def __init__(self, dim_in:int, dim_out:int, n_heads: int = 8, qkv_bias=False):
+    def __init__(self, dim_in:int, dim_out:int, n_heads: int = 8, qkv_bias=False, a_scale:int=2, mode:str='joint'):
         super().__init__()
         assert dim_in % n_heads == 0, "dim_in must be divisible by n_heads"
         self.dim_h = dim_in // n_heads
         self.h = n_heads
-        #self.qk_scale = self.dim_h ** -0.5 # 1 / sqrt(dH)
-        self.w_qkv = nn.Linear(dim_in, 5*dim_in, bias=qkv_bias) # (2C + 2C + C)
-        self.a = nn.Linear(2*self.dim_h, 1, bias=False)
+        self.w_qkv = nn.Linear(dim_in, (2*a_scale+1)*dim_in, bias=qkv_bias) # (2C + 2C + C)
+        self.a = nn.Linear(a_scale*self.dim_h, 1, bias=False)
         self.proj = nn.Linear(dim_in, dim_out)
-        self.relu_ = nn.ReLU(inplace=True)
+        self.a_scale = a_scale
+        self.g = b_graph if mode == 'bone' else j_graph
     
-    def forward(self, x:torch.Tensor, g:CachedGraph):
+    def forward(self, x:torch.Tensor):
         B, T, J, C = x.shape
+        A = self.a_scale*self.dim_h
         # Let start_node[i] = start node of i-th edge.
-
-        start_node, end_node = g.edge_index[0], g.edge_index[1]
+        start_node, end_node = self.g.edge_index[0], self.g.edge_index[1]
         qkv:torch.Tensor = self.w_qkv(x)
-        qkv = qkv.view(B,T,J,self.h,5*self.dim_h).transpose(2, 3) # [B,T,J,H,5dH]
-
-        
-        q, k, v = qkv[..., :2*self.dim_h], qkv[..., 2*self.dim_h:4*self.dim_h], qkv[..., 4*self.dim_h:]
-        
-        with profiler.record_function("!Optim1"):
-            qe = q.index_select(dim=2, index=start_node) # [B,T,E,H,2dH]
-            print(qe.shape)
-            quit()
-        ke = k.index_select(dim=2, index=end_node)
-        ve = v.index_select(dim=2, index=end_node)
-
-        z = F.leaky_relu_(qe + ke, negative_slope=0.2)
-        z = self.a(z) # [B,T,H,E]
-        z = z.squeeze(-1)
-        z = torch.exp(z - torch.max(z, dim=-1, keepdim=True).values)
-        sigma = x.new_zeros(B,T,self.h,J)
-        sigma.index_add_(dim=-1, index=start_node, source=z)
-        attn = z / sigma[..., start_node] # [B,T,H,E]
-
-        with profiler.record_function("!Optim2."):
-            attn.unsqueeze_(-1)
-            weighted_v = attn * ve # [B,T,H,E,dH]
-
-        out = x.new_zeros(B,T,self.h,J,self.dim_h)
-        out.index_add_(dim=-2, index=start_node, source=weighted_v)
-        out.transpose_(2, 3)
-        out = out.view(B,T,J,C)
-        out = self.proj(out)
-        return F.relu_(out)
+        qkv = qkv.view(B,T,J,self.h,2*A+self.dim_h)
+        q, k, v = torch.split(qkv, split_size_or_sections=[A,A,self.dim_h], dim=-1) # [B,T,J,H, ?*dH]
+        z = q[..., start_node,:,:] + k[..., end_node,  :,:] # [B,T,E,H,2dH]
+        z = F.leaky_relu_(z, negative_slope=0.2)
+        z:torch.Tensor = self.a(z).squeeze(-1) # [B,T,E,H]
+        z = torch.exp(z - z.amax(dim=2, keepdim=True))
+        sigma = x.new_zeros(B,T,J,self.h)
+        sigma = sigma.index_add(dim=2, index=start_node, source=z) # [B,T,J,H]
+        attn = z / sigma[..., start_node, :] # [B,T,E,H]
+        attn = attn.transpose(2, 3) # [B,T,H,E]
+        dense_attn = x.new_zeros(B,T,self.h,J,J)
+        dense_attn[..., start_node, end_node] = attn # [B,T,H,J,J]
+        v = v.transpose(2, 3) # [B,T,H,J,dH]
+        v = dense_attn @ v # [B,T,H,J,dH]
+        v = v.transpose(2, 3).reshape(B,T,J,C)
+        v = self.proj(v)
+        return F.relu(v)
 
 
 
@@ -186,7 +159,23 @@ def show_mem(tag=""):
 def profile_gat():
     B, T, J, C = 8, 81, 17, 512
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = GAT(C,C,1)
+    model = GAT(C,C,4)
+    model.to(device)
+    # Test forward pass
+    x = torch.randn(B, T, J, C, device=device)
+    sort_by = 'cuda_memory_usage'
+    with profiler.profile(with_stack=True, 
+                          profile_memory=True, 
+                          use_device='cuda',
+                          experimental_config=torch._C._profiler._ExperimentalConfig(verbose=True)) as prof:
+        x = model(x, j_graph)
+    torch.cuda.synchronize()
+    print(prof.key_averages(group_by_stack_n=8).table(sort_by=sort_by, row_limit=10))
+
+def profile_skip_gat():
+    B, T, J, C = 8, 81, 17, 512
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = SkipableGAT(C, 4, drop=0.4)
     model.to(device)
     # Test forward pass
     x = torch.randn(B, T, J, C, device=device)
@@ -203,14 +192,16 @@ def profile_gat():
 def test_many_modules():
     B, T, J, C = 8, 81, 17, 512
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = nn.ModuleList([GAT(C, C, 1, False) for _ in range(16)])
+    model = nn.ModuleList([SkipableGAT(dim=C, drop=0.1, bottle_neck=2) for _ in range(16)])
     model.to(device)
 
     x = torch.randn(B, T, J, C, device=device)
     show_mem('---before---')
     for m in model:
-        x = m(x, j_graph)
+        x = m(x)
     show_mem('---after---')
 
 if __name__ == '__main__':
-    profile_gat()
+    #profile_gat()
+    test_many_modules()
+    #profile_skip_gat()

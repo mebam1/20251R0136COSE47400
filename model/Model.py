@@ -3,13 +3,14 @@ from collections import OrderedDict
 import torch
 from torch import nn
 from timm.models.layers import DropPath
+from torch.utils.checkpoint import checkpoint
 import os,sys
 sys.path.append(os.path.abspath(__file__))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from model.modules.attention import Attention
 from model.modules.mlp import MLP
 from model.modules.crossattention import CrossAttention
-from model.modules.graph_attention import SpatialBlock
+from model.modules.graph_attention import SkipableGAT
 from model.modules.ModelBlock import MIBlock
 os.environ['CUDA_VISIBLE_DEVICES'] = '0' 
 
@@ -57,7 +58,7 @@ class TransBlock(nn.Module):
             self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop,
                                    proj_drop=drop, mode=mode)
         elif mixer_type == 'graph':
-            self.mixer = SpatialBlock(dim, drop=drop, use_grad_checkpont=False)
+            self.mixer = SkipableGAT(dim, drop=drop, use_checkpoint=False)
         self.norm2 = nn.LayerNorm(dim)
 
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -98,7 +99,7 @@ class TransBlock(nn.Module):
                 x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
         elif self.mixer_type == 'graph':
-            x = x + self.drop_path(self.mixer(x))
+            x = self.mixer(x)
             return x
         else:
             raise NotImplementedError(f'{self.mode} is not implemented in TransBlock.forward')
@@ -424,9 +425,10 @@ class MemoryInducedTransformer(nn.Module):
         x = x + self.pos_embed
 
         for layer,temporal_layer in zip(self.layers,self.temporal_layers):
-            x = layer(x)
-            x,pose_query = temporal_layer(x,pose_query)
-
+            if self.training:
+                x, pose_query = checkpoint(self.forward_one_layer, x, layer, temporal_layer, pose_query, use_reentrant=False)
+            else:
+                x, pose_query = self.forward_one_layer(x, layer, temporal_layer, pose_query)
 
         x = self.norm(x)
         x = self.rep_logit(x)
@@ -436,6 +438,10 @@ class MemoryInducedTransformer(nn.Module):
         x = self.head(x)
 
         return x
+    
+    def forward_one_layer(self, x, layer, tlayer, pose_query):
+        x = layer(x)
+        return tlayer(x, pose_query)
 
 
 def _test():
