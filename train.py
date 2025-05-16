@@ -251,7 +251,7 @@ def train(args, opts):
 
     common_loader_params = {
         'batch_size': args.batch_size,
-        'num_workers': 2,
+        'num_workers': 4,
         # 'num_workers': opts.num_cpus - 1,
         'pin_memory': True,
         'prefetch_factor': (opts.num_cpus - 1) // 3,

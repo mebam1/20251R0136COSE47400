@@ -29,9 +29,7 @@ class CachedGraph():
                 ]
                 ], device=device, dtype=torch.long)
             
-            #x = x[:, (x[0] < x[1])]
-            
-            x = torch.cat([x, torch.arange(0, 17, step=1,device=device, dtype=torch.int64).expand(2, -1)], dim=1)
+            #x = torch.cat([x, torch.arange(0, 17, step=1,device=device, dtype=torch.int64).expand(2, -1)], dim=1)
             return CachedGraph(x, 17)
         else:
             # Human Bone structure (DSTFormer)
@@ -43,8 +41,7 @@ class CachedGraph():
                     1,3,6,0,2,1,0,4,6,3,5,4,0,3,7,6,8,10,13,7,9,10,13,8,7,8,11,13,10,12,11,7,8,10,14,13,15,14
                 ]
                 ], device=device, dtype=torch.long)
-            #x = x[:, (x[0] < x[1])]
-            x = torch.cat([x, torch.arange(0, 16, step=1,device=device, dtype=torch.int64).expand(2, -1)], dim=1)
+            #x = torch.cat([x, torch.arange(0, 16, step=1,device=device, dtype=torch.int64).expand(2, -1)], dim=1)
             return CachedGraph(x, 16)
 
 j_graph=CachedGraph.build_human_graph('joint')
@@ -58,14 +55,14 @@ class SkipableGAT(nn.Module):
         self.use_checkpoint = use_checkpoint
         self.norm1 = nn.LayerNorm(dim)
         self.j_conv = nn.Sequential(nn.Linear(dim, gat_dim), GAT(gat_dim, gat_dim, mode='joint'), nn.Linear(gat_dim, dim))
-        self.j_alpha = nn.Sequential(nn.Linear(dim, gat_dim), nn.LeakyReLU(0.2, inplace=True), nn.Linear(gat_dim, 2), nn.Softmax(dim=-1))
+        self.j_alpha = Alpha(dim)
         self.drop1 = nn.Dropout(drop)
 
         self.norm2 = nn.LayerNorm(dim)
         self.to_bone = nn.Linear(j_graph.num_nodes, b_graph.num_nodes)
         self.to_joint = nn.Linear(b_graph.num_nodes, j_graph.num_nodes)
         self.b_conv = nn.Sequential(nn.Linear(dim, gat_dim), GAT(gat_dim, gat_dim, mode='bone'), nn.Linear(gat_dim, dim))
-        self.b_alpha = nn.Sequential(nn.Linear(dim, gat_dim), nn.LeakyReLU(0.2, inplace=True), nn.Linear(gat_dim, 2), nn.Softmax(dim=-1))
+        self.b_alpha = Alpha(dim)
         self.drop2 = nn.Dropout(drop)
 
     def forward(self, x:torch.Tensor):
@@ -80,6 +77,8 @@ class SkipableGAT(nn.Module):
         x = self.norm1(x)
         x0 = x
         x = self.joint_forward(x, x0)
+        #x = self.joint_forward(x, x0)
+        #x = self.bone_forward(x, x0)
         x = self.bone_forward(x, x0)
         return x
     
@@ -91,12 +90,14 @@ class SkipableGAT(nn.Module):
         return x
     
     def bone_forward(self, x:torch.Tensor, x0:torch.Tensor):
-        x = x.transpose(2, 3) # [B,T,C,J]
-        x = self.to_bone(x)
-        x = x.transpose(2, 3)
+        x = x.transpose(2, 3) # [B,T,C,n_joint]
+        x = self.to_bone(x)   # [B,T,C,n_bone]
+        x = x.transpose(2, 3) # [B,T,n_bone,C]
+
         x = self.norm2(x)
         x = self.b_conv(x)
         x = x.transpose(2, 3)
+        
         x = self.to_joint(x)
         x = x.transpose(2, 3)
         x = self.drop2(x)
@@ -104,7 +105,17 @@ class SkipableGAT(nn.Module):
         x = skip_rate[..., 0:1] * x0 + skip_rate[..., 1:2] * x
         return x
 
+class Alpha(nn.Module):
+    def __init__(self, dim:int):
+        super().__init__()
+        self.fc1 = nn.Linear(dim, dim)
+        self.out = nn.Sequential(nn.LayerNorm(dim), nn.Softplus(), nn.Linear(dim, 2), nn.Softmax(dim=-1))
 
+    def forward(self, x:torch.Tensor):
+        res = x
+        x = self.fc1(x)
+        x = res + x
+        return self.out(x)
 
 
 class GAT(nn.Module):
@@ -113,7 +124,7 @@ class GAT(nn.Module):
         assert dim_in % n_heads == 0, "dim_in must be divisible by n_heads"
         self.dim_h = dim_in // n_heads
         self.h = n_heads
-        self.w_qkv = nn.Linear(dim_in, (2*a_scale+1)*dim_in, bias=qkv_bias) # (2C + 2C + C)
+        self.w_qkv = nn.Linear(dim_in, (3*a_scale)*dim_in, bias=qkv_bias)
         self.a = nn.Linear(a_scale*self.dim_h, 1, bias=False)
         self.proj = nn.Linear(dim_in, dim_out)
         self.a_scale = a_scale
@@ -125,10 +136,10 @@ class GAT(nn.Module):
         # Let start_node[i] = start node of i-th edge.
         start_node, end_node = self.g.edge_index[0], self.g.edge_index[1]
         qkv:torch.Tensor = self.w_qkv(x)
-        qkv = qkv.view(B,T,J,self.h,2*A+self.dim_h)
-        q, k, v = torch.split(qkv, split_size_or_sections=[A,A,self.dim_h], dim=-1) # [B,T,J,H, ?*dH]
-        z = q[..., start_node,:,:] + k[..., end_node,  :,:] # [B,T,E,H,2dH]
-        z = F.leaky_relu_(z, negative_slope=0.2)
+        qkv = qkv.view(B,T,J,self.h,3*A)
+        q, k, v = torch.split(qkv, split_size_or_sections=[A,A,A], dim=-1) # [B,T,J,H,A]
+        z = q[..., start_node,:,:] + k[..., end_node,  :,:] # [B,T,E,H,A]
+        z = F.softplus(z)
         z:torch.Tensor = self.a(z).squeeze(-1) # [B,T,E,H]
         z = torch.exp(z - z.amax(dim=2, keepdim=True))
         sigma = x.new_zeros(B,T,J,self.h)
@@ -137,11 +148,13 @@ class GAT(nn.Module):
         attn = attn.transpose(2, 3) # [B,T,H,E]
         dense_attn = x.new_zeros(B,T,self.h,J,J)
         dense_attn[..., start_node, end_node] = attn # [B,T,H,J,J]
-        v = v.transpose(2, 3) # [B,T,H,J,dH]
-        v = dense_attn @ v # [B,T,H,J,dH]
+
+        v = v.transpose(2, 3) # [B,T,H,J,A]
+        v1, v2 = torch.split(v, split_size_or_sections=[self.dim_h, self.dim_h], dim=-1) # [B,T,H,J,dH]
+        v = v1 + dense_attn @ v2 # [B,T,H,J,dH]
         v = v.transpose(2, 3).reshape(B,T,J,C)
         v = self.proj(v)
-        return F.relu(v)
+        return F.gelu(v)
 
 
 
