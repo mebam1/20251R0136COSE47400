@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import torch.autograd.profiler as profiler
+import math
 
 
 class CachedGraph():
@@ -53,10 +54,10 @@ class SkipableGAT(nn.Module):
         assert dim % bottle_neck == 0, f"(dim={dim}) must be divisible by (bottleneck={bottle_neck})."
         gat_dim = dim // bottle_neck
         self.use_checkpoint = use_checkpoint
-        self.norm1 = nn.LayerNorm(dim)
+        #self.norm1 = nn.LayerNorm(dim)
         self.j_conv = nn.Sequential(nn.Linear(dim, gat_dim), GAT(gat_dim, gat_dim, mode='joint'), nn.Linear(gat_dim, dim))
-        self.j_alpha = Alpha(dim)
-        self.drop1 = nn.Dropout(drop)
+        #self.j_alpha = Alpha(dim)
+        #self.drop1 = nn.Dropout(drop)
 
         self.norm2 = nn.LayerNorm(dim)
         self.to_bone = nn.Linear(j_graph.num_nodes, b_graph.num_nodes)
@@ -74,22 +75,12 @@ class SkipableGAT(nn.Module):
     
     def _forward_impl(self, x:torch.Tensor):
         # Consider x.shape: [B, T, J, C].
-        x = self.norm1(x)
-        x0 = x
-        x = self.joint_forward(x, x0)
-        #x = self.joint_forward(x, x0)
-        #x = self.bone_forward(x, x0)
-        x = self.bone_forward(x, x0)
-        return x
-    
-    def joint_forward(self, x:torch.Tensor, x0:torch.Tensor):
         x = self.j_conv(x)
-        x = self.drop1(x)
-        skip_rate = self.j_alpha(x + x0)
-        x = skip_rate[..., 0:1] * x0 + skip_rate[..., 1:2] * x
+        x = self.bone_forward(x)
         return x
     
-    def bone_forward(self, x:torch.Tensor, x0:torch.Tensor):
+    def bone_forward(self, x:torch.Tensor):
+        x0 = x
         x = x.transpose(2, 3) # [B,T,C,n_joint]
         x = self.to_bone(x)   # [B,T,C,n_bone]
         x = x.transpose(2, 3) # [B,T,n_bone,C]
@@ -101,21 +92,22 @@ class SkipableGAT(nn.Module):
         x = self.to_joint(x)
         x = x.transpose(2, 3)
         x = self.drop2(x)
-        skip_rate = self.b_alpha(x + x0)
+        skip_rate = self.b_alpha(x0, x)
         x = skip_rate[..., 0:1] * x0 + skip_rate[..., 1:2] * x
         return x
+    
 
 class Alpha(nn.Module):
-    def __init__(self, dim:int):
+    def __init__(self, dim:int, p_x:float=0.01):
         super().__init__()
-        self.fc1 = nn.Linear(dim, dim)
-        self.out = nn.Sequential(nn.LayerNorm(dim), nn.Softplus(), nn.Linear(dim, 2), nn.Softmax(dim=-1))
+        self.out = nn.Sequential(nn.Linear(2*dim, dim), nn.LayerNorm(dim), nn.Softplus(), nn.Linear(dim, 2), nn.Softmax(dim=-1))
+        z = math.log((1.0 - p_x) / p_x) * 0.5
+        with torch.no_grad():
+            self.out[3].bias.copy_(torch.tensor([-z, z]))
 
-    def forward(self, x:torch.Tensor):
-        res = x
-        x = self.fc1(x)
-        x = res + x
-        return self.out(x)
+
+    def forward(self, x:torch.Tensor, y:torch.Tensor):
+        return self.out(torch.cat((x, y), dim=-1))
 
 
 class GAT(nn.Module):
@@ -142,7 +134,7 @@ class GAT(nn.Module):
         z = F.softplus(z)
         z:torch.Tensor = self.a(z).squeeze(-1) # [B,T,E,H]
         z = torch.exp(z - z.amax(dim=2, keepdim=True))
-        sigma = x.new_zeros(B,T,J,self.h)
+        sigma = x.new_ones(B,T,J,self.h) * 1e-10
         sigma = sigma.index_add(dim=2, index=start_node, source=z) # [B,T,J,H]
         attn = z / sigma[..., start_node, :] # [B,T,E,H]
         attn = attn.transpose(2, 3) # [B,T,H,E]
