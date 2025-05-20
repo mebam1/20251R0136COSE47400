@@ -10,7 +10,27 @@ class CachedGraph():
     @torch.no_grad()
     def __init__(self, edge_index:torch.Tensor, num_nodes:int):
         self.num_nodes = num_nodes
-        self.edge_index = edge_index
+        one_hop_adj = CachedGraph.get_adj(num_nodes, edge_index)
+        two_hop_adj = one_hop_adj @ one_hop_adj
+        adj = one_hop_adj + two_hop_adj
+        adj.fill_diagonal_(0)
+        self.edge_index = self.get_edge_index(adj)
+
+    @staticmethod
+    @torch.no_grad()
+    def get_adj(num_nodes:int, edge_index:torch.Tensor) -> torch.Tensor:
+        adj = edge_index.new_zeros((num_nodes, num_nodes), dtype=torch.float32)
+        src, dst = edge_index[0], edge_index[1]
+        adj[src, dst] = 1.0
+        return adj
+    
+    @staticmethod
+    @torch.no_grad()
+    def get_edge_index(adj:torch.Tensor) -> torch.Tensor:
+        src, dst = adj.nonzero(as_tuple=True)
+        edge_index = torch.stack([src, dst], dim=0)
+        return edge_index
+
 
     @staticmethod
     @torch.no_grad()
@@ -30,7 +50,6 @@ class CachedGraph():
                 ]
                 ], device=device, dtype=torch.long)
             
-            #x = torch.cat([x, torch.arange(0, 17, step=1,device=device, dtype=torch.int64).expand(2, -1)], dim=1)
             return CachedGraph(x, 17)
         else:
             # Human Bone structure (DSTFormer)
@@ -42,7 +61,7 @@ class CachedGraph():
                     1,3,6,0,2,1,0,4,6,3,5,4,0,3,7,6,8,10,13,7,9,10,13,8,7,8,11,13,10,12,11,7,8,10,14,13,15,14
                 ]
                 ], device=device, dtype=torch.long)
-            #x = torch.cat([x, torch.arange(0, 16, step=1,device=device, dtype=torch.int64).expand(2, -1)], dim=1)
+            
             return CachedGraph(x, 16)
 
 j_graph=CachedGraph.build_human_graph('joint')
@@ -111,14 +130,14 @@ class Alpha(nn.Module):
 
 
 class GAT(nn.Module):
-    def __init__(self, dim_in:int, dim_out:int, n_heads: int = 8, qkv_bias=False, a_scale:int=2, mode:str='joint'):
+    def __init__(self, dim:int, n_heads: int = 8, qkv_bias=False, a_scale:int=2, mode:str='joint'):
         super().__init__()
-        assert dim_in % n_heads == 0, "dim_in must be divisible by n_heads"
-        self.dim_h = dim_in // n_heads
+        assert dim % n_heads == 0, "dim must be divisible by n_heads"
+        self.dim_h = dim // n_heads
         self.h = n_heads
-        self.w_qkv = nn.Linear(dim_in, (3*a_scale)*dim_in, bias=qkv_bias)
+        self.w_qkv = nn.Linear(dim, (3*a_scale)*dim, bias=qkv_bias)
         self.a = nn.Linear(a_scale*self.dim_h, 1, bias=False)
-        self.proj = nn.Linear(dim_in, dim_out)
+        self.proj = nn.Linear(dim, dim)
         self.a_scale = a_scale
         self.g = b_graph if mode == 'bone' else j_graph
     
@@ -140,13 +159,11 @@ class GAT(nn.Module):
         attn = attn.transpose(2, 3) # [B,T,H,E]
         dense_attn = x.new_zeros(B,T,self.h,J,J)
         dense_attn[..., start_node, end_node] = attn # [B,T,H,J,J]
-
         v = v.transpose(2, 3) # [B,T,H,J,A]
         v1, v2 = torch.split(v, split_size_or_sections=[self.dim_h, self.dim_h], dim=-1) # [B,T,H,J,dH]
         v = v1 + dense_attn @ v2 # [B,T,H,J,dH]
         v = v.transpose(2, 3).reshape(B,T,J,C)
-        v = self.proj(v)
-        return F.gelu(v)
+        return v
 
 
 
@@ -207,6 +224,8 @@ def test_many_modules():
     show_mem('---after---')
 
 if __name__ == '__main__':
-    #profile_gat()
-    test_many_modules()
-    #profile_skip_gat()
+    print(j_graph.edge_index.shape)
+    x  =j_graph.edge_index
+    for i in range(x.shape[1]):
+        print(x[0, i].item(), ' ' ,x[1, i].item())
+    
