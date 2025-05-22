@@ -11,6 +11,7 @@ g_dict = {
     'cayley':CachedGraph.build_human_graph(mode='cayley')
     }
 
+n_additional_node = g_dict['cayley'].num_nodes - g_dict['skeleton'].num_nodes
 
 class SkipableGAT(nn.Module):
     def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True):
@@ -20,7 +21,8 @@ class SkipableGAT(nn.Module):
         conv1 = nn.Sequential(GAT(dim, mode='skeleton'), dr, nn.LayerNorm(dim))
         conv2 = nn.Sequential(GAT(dim, mode='cayley'), dr, nn.LayerNorm(dim))
         conv3 = nn.Sequential(GAT(dim, mode='skeleton'), dr, nn.LayerNorm(dim))
-        self.convs = nn.ModuleList([conv1, conv2, conv3])
+        conv4 = nn.Sequential(GAT(dim, mode='cayley'), dr, nn.LayerNorm(dim))
+        self.convs = nn.ModuleList([conv1, conv2, conv3, conv4])
         self.proj = nn.Sequential(nn.Linear(dim*(1 + len(self.convs)), dim), nn.LayerNorm(dim))
 
     def forward(self, x:torch.Tensor):
@@ -32,12 +34,13 @@ class SkipableGAT(nn.Module):
     
     def _forward_impl(self, x:torch.Tensor):
         # Consider x.shape: [B, T, J, C].
+        B, T, J, C = x.shape
         outputs = [x]
+        x = torch.cat((x, x.new_zeros((B,T,n_additional_node,C))), dim=2)
 
         for conv in self.convs:
             x = conv(x)
-            outputs.append(x)
-
+            outputs.append(x[..., :-n_additional_node,:])
         x = torch.cat(outputs, dim=-1)
         x = self.proj(x)
         return x

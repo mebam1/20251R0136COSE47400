@@ -1,4 +1,5 @@
 import torch
+from itertools import product
 
 class CachedGraph():
     @torch.no_grad()
@@ -10,6 +11,7 @@ class CachedGraph():
             adj = one_hop_adj + two_hop_adj
             adj.fill_diagonal_(0)
             self.edge_index = self.get_edge_index(adj)
+            self.num_nodes = num_nodes
 
         elif mode == 'cayley':
             self.edge_index = edge_index
@@ -51,17 +53,49 @@ class CachedGraph():
                 ], device=device, dtype=torch.long)
             return CachedGraph(x, 17, mode)
         elif mode == 'cayley':
-            return CachedGraph(Cayley(17, device), 17, mode)
+            x, n = Cayley(device)
+            return CachedGraph(x, n, mode)
+
+def det_mod3(a, b, c, d):
+    return (a * d - b * c) % 3 == 1
+
+def matmul_mod3(m1, m2):
+    a1, b1 = m1[0]
+    c1, d1 = m1[1]
+    a2, b2 = m2[0]
+    c2, d2 = m2[1]
+    return (
+        (( (a1 * a2 + b1 * c2) % 3, (a1 * b2 + b1 * d2) % 3 ),
+         ( (c1 * a2 + d1 * c2) % 3, (c1 * b2 + d1 * d2) % 3 ))
+    )
 
 @torch.no_grad()
-def Cayley(n:int, device):
-    assert n >= 3
-    gens = [2, 3]
-    edges = []
-    for v in range(n):
-        for g in gens:
-            edges.append([v, (v + g) % n])
-            edges.append([v, (v - g) % n])
+def Cayley(device):
+    Z3 = [0, 1, 2]
+    SL2_Z3 = []
 
-    edge_index_cayley = torch.tensor(edges, dtype=torch.long, device=device).t()
-    return edge_index_cayley
+    for a, b, c, d in product(Z3, repeat=4):
+        if det_mod3(a, b, c, d):
+            SL2_Z3.append(((a, b), (c, d)))
+
+    mat2idx = {m: i for i, m in enumerate(SL2_Z3)}
+
+    S3 = [
+        ((1, 1), (0, 1)),
+        ((1, 0), (1, 1)),
+    ]
+
+    edges = []
+
+    for g in SL2_Z3:
+        u = mat2idx[g]
+        for s in S3:
+            gs = matmul_mod3(g, s)
+            if gs in mat2idx:
+                v = mat2idx[gs]
+                edges.append((u, v))
+                edges.append((v, u))  # 무방향 edge
+
+    edge_index = torch.tensor(edges, dtype=torch.long, device=device).t().contiguous()
+    print("Edge index shape:", edge_index.shape)
+    return edge_index, len(SL2_Z3)
