@@ -16,29 +16,31 @@ class SkipableGAT(nn.Module):
     def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True):
         super().__init__()
         self.use_checkpoint = use_checkpoint
-        conv1 = GAT(dim, mode='skeleton')
-        norm = nn.LayerNorm(dim)
-        conv2 = GAT(dim, mode='cayley')
-        drop = nn.Dropout(drop * 0.5, True) if drop < 0.001 else nn.Identity()
-
-        self.gat = nn.Sequential(
-            conv1,
-            drop,
-            norm,
-            conv2,
-            drop
-        )
+        dr = nn.Dropout(drop * 0.25, True) if drop > 0.001 else nn.Identity()
+        conv1 = nn.Sequential(GAT(dim, mode='skeleton'), dr, nn.LayerNorm(dim))
+        conv2 = nn.Sequential(GAT(dim, mode='cayley'), dr, nn.LayerNorm(dim))
+        conv3 = nn.Sequential(GAT(dim, mode='skeleton'), dr, nn.LayerNorm(dim))
+        self.convs = nn.ModuleList([conv1, conv2, conv3])
+        self.proj = nn.Linear(dim*len(self.convs), dim)
 
     def forward(self, x:torch.Tensor):
         if self.training and self.use_checkpoint:
             return checkpoint(self._forward_impl, x, use_reentrant=False)
         else:
-            return self.gat(x)
+            return self._forward_impl(x)
 
     
     def _forward_impl(self, x:torch.Tensor):
         # Consider x.shape: [B, T, J, C].
-        return self.gat(x)
+        outputs = []
+
+        for conv in self.convs:
+            x = conv(x)
+            outputs.append(x)
+
+        x = torch.cat(outputs, dim=-1)
+        x = self.proj(x)
+        return x
     
 
 class Alpha(nn.Module):
