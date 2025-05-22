@@ -21,7 +21,7 @@ class SkipableGAT(nn.Module):
         conv2 = nn.Sequential(GAT(dim, mode='cayley'), dr, nn.LayerNorm(dim))
         conv3 = nn.Sequential(GAT(dim, mode='skeleton'), dr, nn.LayerNorm(dim))
         self.convs = nn.ModuleList([conv1, conv2, conv3])
-        self.proj = nn.Linear(dim*len(self.convs), dim)
+        self.proj = nn.Sequential(nn.Linear(dim*(1 + len(self.convs)), dim), nn.LayerNorm(dim))
 
     def forward(self, x:torch.Tensor):
         if self.training and self.use_checkpoint:
@@ -32,7 +32,7 @@ class SkipableGAT(nn.Module):
     
     def _forward_impl(self, x:torch.Tensor):
         # Consider x.shape: [B, T, J, C].
-        outputs = []
+        outputs = [x]
 
         for conv in self.convs:
             x = conv(x)
