@@ -49,7 +49,7 @@ def parse_args():
 def train_one_epoch(args, model, train_loader, optimizer, device, losses):
     model.train()        
     optimizer.zero_grad()
-    accumulation_steps = 1
+    accumulation_steps = 4
     i = 0
     for x, y in tqdm(train_loader):
         batch_size = x.shape[0]

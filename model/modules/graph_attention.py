@@ -4,100 +4,41 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import torch.autograd.profiler as profiler
 import math
+from model.modules.human_graph import CachedGraph
 
+g_dict = {
+    'skeleton':CachedGraph.build_human_graph(mode='skeleton'),
+    'cayley':CachedGraph.build_human_graph(mode='cayley')
+    }
 
-class CachedGraph():
-    @torch.no_grad()
-    def __init__(self, edge_index:torch.Tensor, num_nodes:int):
-
-        one_hop_adj = CachedGraph.get_adj(num_nodes, edge_index)
-        two_hop_adj = one_hop_adj @ one_hop_adj
-        adj = one_hop_adj + two_hop_adj
-        adj.fill_diagonal_(0)
-        self.edge_index = self.get_edge_index(adj)
-
-        g1, g2 = num_nodes, num_nodes + 1
-        all_base_nodes = torch.arange(17, device=edge_index.device)
-        edges_global1 = torch.stack([all_base_nodes, torch.full_like(all_base_nodes, g1)], dim=0)
-        edges_global1_rev = torch.stack([torch.full_like(all_base_nodes, g1), all_base_nodes], dim=0)
-        edges_global2 = torch.stack([all_base_nodes, torch.full_like(all_base_nodes, g2)], dim=0)
-        edges_global2_rev = torch.stack([torch.full_like(all_base_nodes, g2), all_base_nodes], dim=0)
-        self.edge_index = torch.cat([
-            self.edge_index,
-            edges_global1, edges_global1_rev,
-            edges_global2, edges_global2_rev
-        ], dim=1)
-
-        self.num_nodes = num_nodes + 2
-
-
-    @staticmethod
-    @torch.no_grad()
-    def get_adj(num_nodes:int, edge_index:torch.Tensor) -> torch.Tensor:
-        adj = edge_index.new_zeros((num_nodes, num_nodes), dtype=torch.float32)
-        src, dst = edge_index[0], edge_index[1]
-        adj[src, dst] = 1.0
-        return adj
-    
-    @staticmethod
-    @torch.no_grad()
-    def get_edge_index(adj:torch.Tensor) -> torch.Tensor:
-        src, dst = adj.nonzero(as_tuple=True)
-        edge_index = torch.stack([src, dst], dim=0)
-        return edge_index
-
-
-    @staticmethod
-    @torch.no_grad()
-    def build_human_graph():
-
-        device ='cuda' if torch.cuda.is_available() else 'cpu'
-        x = torch.tensor([
-            [
-                0,0,0,1,1,2,2,3,4,4,5,5,6,7,7,8,8,8,8,9,9,10,11,11,12,12,13,14,14,15,15,16
-            ],
-            [
-                1,4,7,0,2,1,3,2,0,5,4,6,5,0,8,7,9,11,14,8,10,9,8,12,11,13,12,8,15,14,16,15
-            ]
-            ], device=device, dtype=torch.long)
-        
-        return CachedGraph(x, 17)
-    
-
-j_graph=CachedGraph.build_human_graph()
 
 class SkipableGAT(nn.Module):
-    def __init__(self, dim:int, bottle_neck:int=2, drop:float=0.0, use_checkpoint=True):
+    def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True):
         super().__init__()
-        assert dim % bottle_neck == 0, f"(dim={dim}) must be divisible by (bottleneck={bottle_neck})."
-        gat_dim = dim // bottle_neck
         self.use_checkpoint = use_checkpoint
-        conv1 = nn.Sequential(nn.Linear(dim, gat_dim), GAT(gat_dim), nn.Linear(gat_dim, dim))
+        conv1 = GAT(dim, mode='skeleton')
         norm = nn.LayerNorm(dim)
-        conv2 = nn.Sequential(nn.Linear(dim, gat_dim), GAT(gat_dim), nn.Linear(gat_dim, dim))
+        conv2 = GAT(dim, mode='cayley')
+        drop = nn.Dropout(drop * 0.5, True) if drop < 0.001 else nn.Identity()
 
         self.gat = nn.Sequential(
             conv1,
-            nn.Dropout(drop * 0.5, True) if drop < 0.001 else nn.Identity(),
+            drop,
             norm,
             conv2,
-            nn.Dropout(drop * 0.5, True) if drop < 0.001 else nn.Identity()
+            drop
         )
 
     def forward(self, x:torch.Tensor):
         if self.training and self.use_checkpoint:
             return checkpoint(self._forward_impl, x, use_reentrant=False)
         else:
-            return self._forward_impl(x)
+            return self.gat(x)
 
     
     def _forward_impl(self, x:torch.Tensor):
         # Consider x.shape: [B, T, J, C].
-        x_mean_global = x.mean(dim=2, keepdim=True) # [B, T, 1, C]
-        x_zero_global = torch.zeros_like(x_mean_global)
-        x = torch.cat([x, x_zero_global, x_mean_global], dim=2) # [B, T, J+2, C], append global feature.
-        x = self.gat(x)
-        return x[..., :-2, :]
+        return self.gat(x)
     
 
 class Alpha(nn.Module):
@@ -114,16 +55,15 @@ class Alpha(nn.Module):
 
 
 class GAT(nn.Module):
-    def __init__(self, dim:int, n_heads: int = 8, qkv_bias=False, a_scale:int=2):
+    def __init__(self, dim:int, n_heads: int = 8, qkv_bias=False, a_scale:int=2, mode:str='skeleton'):
         super().__init__()
         assert dim % n_heads == 0, "dim must be divisible by n_heads"
         self.dim_h = dim // n_heads
         self.h = n_heads
         self.w_qkv = nn.Linear(dim, (3*a_scale)*dim, bias=qkv_bias)
         self.a = nn.Linear(a_scale*self.dim_h, 1, bias=False)
-        self.proj = nn.Linear(dim, dim)
         self.a_scale = a_scale
-        self.g = j_graph
+        self.g = g_dict[mode] 
     
     def forward(self, x:torch.Tensor):
         B, T, J, C = x.shape
