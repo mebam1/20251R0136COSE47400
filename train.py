@@ -333,6 +333,11 @@ def train(args, opts):
 
         train_one_epoch(args, model, train_loader, optimizer, device, losses)
 
+        print(f"[Train] Losses:")
+        for name in loss_names:
+            print(f"  {name}: {losses[name].avg:.4f}")
+        print('=====')
+
         mpjpe, p_mpjpe, joints_error, acceleration_error = evaluate(args, model, test_loader, datareader, device)
 
         if mpjpe < min_mpjpe:
