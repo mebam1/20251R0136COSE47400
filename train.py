@@ -287,12 +287,12 @@ def train(args, opts):
         checkpoint_path = os.path.join(opts.checkpoint, opts.checkpoint_file if opts.checkpoint_file else "latest_epoch.pth.tr")
         if os.path.exists(checkpoint_path):
             checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage, weights_only=False)
-            model.load_state_dict(checkpoint['model'], strict=True)
+            model.load_state_dict(checkpoint['model'], strict=False)
 
             if opts.resume:
                 lr = checkpoint['lr']
                 epoch_start = checkpoint['epoch']
-                optimizer.load_state_dict(checkpoint['optimizer'])
+                #optimizer.load_state_dict(checkpoint['optimizer'])
                 min_mpjpe = checkpoint['min_mpjpe']
                 if 'wandb_id' in checkpoint and opts.wandb_run_id is None:
                     wandb_id = checkpoint['wandb_id']

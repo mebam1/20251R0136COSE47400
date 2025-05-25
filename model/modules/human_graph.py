@@ -11,6 +11,8 @@ class CachedGraph():
             adj = one_hop_adj + two_hop_adj
             adj.fill_diagonal_(0)
             self.edge_index = self.get_edge_index(adj)
+
+            
             self.num_nodes = num_nodes
 
         elif mode == 'cayley':
@@ -33,7 +35,26 @@ class CachedGraph():
     def get_edge_index(adj:torch.Tensor) -> torch.Tensor:
         src, dst = adj.nonzero(as_tuple=True)
         edge_index = torch.stack([src, dst], dim=0)
-        return edge_index
+
+        new_edges = [
+            (17, 16), (17, 18),
+            (18, 13), (18, 17),
+            (19, 3),  (19, 20),
+            (20, 6),  (20, 19),
+            (21, 14), (21, 15), (21, 22),
+            (22, 11), (22, 12), (22, 21),
+            (23, 2),  (23, 3),  (23, 5), (23, 6),
+        ]
+
+        bidirectional_edges = []
+        for u, v in new_edges:
+            bidirectional_edges.append((u, v))
+            bidirectional_edges.append((v, u))
+
+        new_edge_index = torch.tensor(bidirectional_edges, dtype=torch.long, device=edge_index.device).t()  # shape: [2, num_new_edges]
+        self_edge_index = torch.tensor([(u, u) for u in range(24)], dtype=torch.long, device=edge_index.device).t()
+        e = torch.cat([edge_index, new_edge_index, self_edge_index], dim=-1)
+        return e
 
 
     @staticmethod
@@ -99,3 +120,6 @@ def Cayley(device):
     edge_index = torch.tensor(edges, dtype=torch.long, device=device).t().contiguous()
     print("Edge index shape:", edge_index.shape)
     return edge_index, len(SL2_Z3)
+
+if __name__ == '__main__':
+    test_graph = CachedGraph.build_human_graph()

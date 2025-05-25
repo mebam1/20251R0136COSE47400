@@ -18,12 +18,12 @@ class SkipableGAT(nn.Module):
         super().__init__()
         self.use_checkpoint = use_checkpoint
         dr = nn.Dropout(drop * 0.25, True) if drop > 0.001 else nn.Identity()
-        conv1 = nn.Sequential(GAT(dim, mode='skeleton'), dr, nn.LayerNorm(dim))
-        conv2 = nn.Sequential(GAT(dim, mode='cayley'), dr, nn.LayerNorm(dim))
-        conv3 = nn.Sequential(GAT(dim, mode='skeleton'), dr, nn.LayerNorm(dim))
-        conv4 = nn.Sequential(GAT(dim, mode='cayley'), dr, nn.LayerNorm(dim))
+        conv1 = nn.Sequential(GAT(dim, mode='skeleton'), nn.GELU(), dr, nn.LayerNorm(dim))
+        conv2 = nn.Sequential(GAT(dim, mode='skeleton'), nn.GELU(), dr, nn.LayerNorm(dim))
+        conv3 = nn.Sequential(GAT(dim, mode='skeleton'), nn.GELU(), dr, nn.LayerNorm(dim))
+        conv4 = nn.Sequential(GAT(dim, mode='skeleton'), nn.GELU(), dr, nn.LayerNorm(dim))
         self.convs = nn.ModuleList([conv1, conv2, conv3, conv4])
-        self.proj = nn.Sequential(nn.Linear(dim*(1 + len(self.convs)), dim), nn.LayerNorm(dim))
+        #self.proj = nn.Sequential(nn.Linear(dim*(1 + len(self.convs)), dim), nn.LayerNorm(dim))
 
     def forward(self, x:torch.Tensor):
         if self.training and self.use_checkpoint:
@@ -35,32 +35,26 @@ class SkipableGAT(nn.Module):
     def _forward_impl(self, x:torch.Tensor):
         # Consider x.shape: [B, T, J, C].
         B, T, J, C = x.shape
-        outputs = [x]
+        #outputs = [x]
         x = torch.cat((x, x.new_zeros((B,T,n_additional_node,C))), dim=2)
 
+        '''
         for conv in self.convs:
-            x = conv(x)
+            x = x + conv(x)
             outputs.append(x[..., :-n_additional_node,:])
         x = torch.cat(outputs, dim=-1)
         x = self.proj(x)
+        '''
+
+        for conv in self.convs:
+            x = x + conv(x)
+
+        x = x[..., :-n_additional_node, :]
         return x
-    
-
-class Alpha(nn.Module):
-    def __init__(self, dim:int, p_x:float=0.2):
-        super().__init__()
-        self.out = nn.Sequential(nn.Linear(2*dim, dim), nn.LayerNorm(dim), nn.Softplus(), nn.Linear(dim, 2), nn.Softmax(dim=-1))
-        z = math.log((1.0 - p_x) / p_x) * 0.5
-        with torch.no_grad():
-            self.out[3].bias.copy_(torch.tensor([-z, z]))
-
-
-    def forward(self, x:torch.Tensor, y:torch.Tensor):
-        return self.out(torch.cat((x, y), dim=-1))
 
 
 class GAT(nn.Module):
-    def __init__(self, dim:int, n_heads: int = 8, qkv_bias=False, a_scale:int=2, mode:str='skeleton', beta:float=0.8):
+    def __init__(self, dim:int, n_heads: int = 8, qkv_bias=False, a_scale:int=2, mode:str='skeleton', beta:float=0.95):
         super().__init__()
         assert dim % n_heads == 0, "dim must be divisible by n_heads"
         assert 0.0 <= beta and beta <= 1.0, "beta must be on [0.0, 1.0]"
@@ -92,9 +86,10 @@ class GAT(nn.Module):
         dense_attn[..., start_node, end_node] = attn # [B,T,H,J,J]
         v = v.transpose(2, 3) # [B,T,H,J,A]
         v1, v2 = torch.split(v, split_size_or_sections=[self.dim_h, self.dim_h], dim=-1) # [B,T,H,J,dH]
-        v = (1.0 - self.beta) * v1 + self.beta * dense_attn @ v2 # [B,T,H,J,dH]
+        #v = (1.0 - self.beta) * v1 + self.beta * dense_attn @ v2 # [B,T,H,J,dH]
+        v = dense_attn @ v2
         v = v.transpose(2, 3).reshape(B,T,J,C)
-        return x + v
+        return v
 
 
 
