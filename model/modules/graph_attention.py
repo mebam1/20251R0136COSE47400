@@ -87,7 +87,6 @@ class GAT(nn.Module):
         return v
 
 
-
 #==================#
 #  UNIT TEST CODE  #
 #==================#
