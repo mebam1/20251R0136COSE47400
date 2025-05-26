@@ -1,5 +1,6 @@
 import torch
 from itertools import product
+from torch.linalg import eigh
 
 class CachedGraph():
     @torch.no_grad()
@@ -11,8 +12,7 @@ class CachedGraph():
             adj = one_hop_adj + two_hop_adj
             adj.fill_diagonal_(0)
             self.edge_index = self.get_edge_index(adj)
-
-            
+            self.encoding = GetPosEnc(one_hop_adj, one_hop_adj.device)
             self.num_nodes = num_nodes
 
         elif mode == 'cayley':
@@ -118,8 +118,22 @@ def Cayley(device):
                 edges.append((v, u))  # 무방향 edge
 
     edge_index = torch.tensor(edges, dtype=torch.long, device=device).t().contiguous()
-    print("Edge index shape:", edge_index.shape)
     return edge_index, len(SL2_Z3)
+
+@torch.no_grad()
+def GetPosEnc(adj, device):
+    # D: degree matrix, adj: [N, N] adjacency matrix
+    N = adj.shape[0]
+    deg = adj.sum(dim=1)
+    deg_inv_sqrt = torch.diag(torch.pow(deg.clamp(min=1e-8), -0.5)) # D^{-1/2}
+    I = torch.eye(N, device=device)
+    L = I - deg_inv_sqrt @ adj @ deg_inv_sqrt
+    
+    eigval, eigvec = eigh(L) # eigen-decomposition
+    sorted_index = torch.argsort(eigval)
+    eigvec = eigvec[:, sorted_index[1:]] # [N, 16] positional encoding
+    return eigvec
+
 
 if __name__ == '__main__':
     test_graph = CachedGraph.build_human_graph()

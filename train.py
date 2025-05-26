@@ -49,7 +49,7 @@ def parse_args():
 def train_one_epoch(args, model, train_loader, optimizer, device, losses):
     model.train()        
     optimizer.zero_grad()
-    accumulation_steps = 1
+    accumulation_steps = 4
     i = 0
     for x, y in tqdm(train_loader):
         batch_size = x.shape[0]
@@ -251,7 +251,7 @@ def train(args, opts):
 
     common_loader_params = {
         'batch_size': args.batch_size,
-        'num_workers': 7,
+        'num_workers': 3,
         # 'num_workers': opts.num_cpus - 1,
         'pin_memory': True,
         'prefetch_factor': (opts.num_cpus - 1) // 3,
