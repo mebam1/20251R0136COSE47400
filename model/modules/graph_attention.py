@@ -53,14 +53,12 @@ class GAT(nn.Module):
     def __init__(self, dim:int, n_heads: int = 8, qkv_bias=False, a_scale:int=2, mode:str='skeleton'):
         super().__init__()
         assert dim % n_heads == 0, "dim must be divisible by n_heads"
-        assert 0.0 <= beta and beta <= 1.0, "beta must be on [0.0, 1.0]"
         self.dim_h = dim // n_heads
         self.h = n_heads
         self.w_qkv = nn.Linear(dim, (3*a_scale)*dim, bias=qkv_bias)
         self.a = nn.Linear(a_scale*self.dim_h, 1, bias=False)
         self.a_scale = a_scale
         self.g = g_dict[mode] 
-        self.beta = beta
     
     def forward(self, x:torch.Tensor):
         B, T, J, C = x.shape
