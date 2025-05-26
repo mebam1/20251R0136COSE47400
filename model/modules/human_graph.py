@@ -43,7 +43,7 @@ class CachedGraph():
             (20, 6),  (20, 19),
             (21, 14), (21, 15), (21, 22),
             (22, 11), (22, 12), (22, 21),
-            (23, 2),  (23, 3),  (23, 5), (23, 6),
+            (23, 2), (23, 5)
         ]
 
         bidirectional_edges = []
@@ -52,8 +52,7 @@ class CachedGraph():
             bidirectional_edges.append((v, u))
 
         new_edge_index = torch.tensor(bidirectional_edges, dtype=torch.long, device=edge_index.device).t()  # shape: [2, num_new_edges]
-        self_edge_index = torch.tensor([(u, u) for u in range(24)], dtype=torch.long, device=edge_index.device).t()
-        e = torch.cat([edge_index, new_edge_index, self_edge_index], dim=-1)
+        e = torch.cat([edge_index, new_edge_index], dim=-1)
         return e
 
 

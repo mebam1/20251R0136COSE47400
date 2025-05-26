@@ -50,7 +50,7 @@ class SkipableGAT(nn.Module):
 
 
 class GAT(nn.Module):
-    def __init__(self, dim:int, n_heads: int = 8, qkv_bias=False, a_scale:int=2, mode:str='skeleton', beta:float=0.8):
+    def __init__(self, dim:int, n_heads: int = 8, qkv_bias=False, a_scale:int=2, mode:str='skeleton'):
         super().__init__()
         assert dim % n_heads == 0, "dim must be divisible by n_heads"
         assert 0.0 <= beta and beta <= 1.0, "beta must be on [0.0, 1.0]"
@@ -82,8 +82,7 @@ class GAT(nn.Module):
         dense_attn[..., start_node, end_node] = attn # [B,T,H,J,J]
         v = v.transpose(2, 3) # [B,T,H,J,A]
         v1, v2 = torch.split(v, split_size_or_sections=[self.dim_h, self.dim_h], dim=-1) # [B,T,H,J,dH]
-        #v = (1.0 - self.beta) * v1 + self.beta * dense_attn @ v2 # [B,T,H,J,dH]
-        v = dense_attn @ v2
+        v = v1 + dense_attn @ v2 # [B,T,H,J,dH]
         v = v.transpose(2, 3).reshape(B,T,J,C)
         return v
 
