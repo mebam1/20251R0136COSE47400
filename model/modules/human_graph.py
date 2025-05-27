@@ -1,6 +1,9 @@
 import torch
 from itertools import product
 from torch.linalg import eigh
+import networkx as nx
+import numpy as np
+from GraphRicciCurvature.OllivierRicci import OllivierRicci
 
 class CachedGraph():
     @torch.no_grad()
@@ -12,7 +15,7 @@ class CachedGraph():
             adj = one_hop_adj + two_hop_adj
             adj.fill_diagonal_(0)
             self.edge_index = self.get_edge_index(adj)
-            self.encoding = GetPosEnc(one_hop_adj, one_hop_adj.device)
+            #self.encoding = GetPosEnc(adj, one_hop_adj.device)
             self.num_nodes = num_nodes
 
         elif mode == 'cayley':
@@ -127,13 +130,80 @@ def GetPosEnc(adj, device):
     deg_inv_sqrt = torch.diag(torch.pow(deg.clamp(min=1e-8), -0.5)) # D^{-1/2}
     I = torch.eye(N, device=device)
     L = I - deg_inv_sqrt @ adj @ deg_inv_sqrt
+    print(L == L.t())
     
     eigval, eigvec = eigh(L) # eigen-decomposition
     sorted_index = torch.argsort(eigval)
     eigvec = eigvec[:, sorted_index[1:]] # [N, 16] positional encoding
+    print(eigval)
     return eigvec
 
 
-if __name__ == '__main__':
-    test_graph = CachedGraph.build_human_graph()
-    print(test_graph.edge_index.shape)
+@torch.no_grad()
+def ricci_rewire(
+    edge_index: torch.LongTensor,          # [2, E]
+    num_nodes: int,
+    *,
+    alpha: float = 0.6,                    # Wasserstein mixing (0.5~0.8 일반적)
+    n_iter: int = 12,                      # Ricci-flow step
+    step: float = 0.1,
+    add_pct: float = 10.0,                 # 음의 곡률 하위 add_pct% 간선 추가
+    drop_pct: float = 0.0,                 # 양의 곡률 상위 drop_pct% 간선 제거
+    keep_self_loops: bool = True,
+    device =  None,
+):
+    """
+    Returns
+    -------
+    edge_index_new : [2, E']
+    edge_weight_new: [E']   (1.0 for un-weighted edges)
+    """
+    # 1) edge_index → NetworkX 그래프 (무가중치 undirected)
+    src, dst = edge_index.cpu().numpy()
+    G = nx.Graph()
+    G.add_nodes_from(range(num_nodes))
+    G.add_edges_from(zip(src.tolist(), dst.tolist()))
+    if keep_self_loops:
+        G.add_edges_from([(i, i) for i in range(num_nodes)])
+
+    # 2) Ollivier-Ricci curvature & flow
+    orc = OllivierRicci(G, alpha=alpha, verbose="INFO")
+    orc.compute_ricci_curvature()                # 한번에 곡률만
+
+    
+    edge2curv = orc.G.edges   # dict: {(u,v):{'ricciCurvature':c}}
+    curv_vals = np.array([d["ricciCurvature"] for d in edge2curv.values()])
+
+    # 3) 임계값 계산
+    add_thr  = np.percentile(curv_vals, add_pct)    # 낮을수록 더 negative
+    drop_thr = np.percentile(curv_vals, 100 - drop_pct) if drop_pct > 0 else np.inf
+
+    # 4) 간선 선택
+    add_edges  = [(u, v) for (u, v), d in edge2curv.items() if d["ricciCurvature"] < add_thr]
+    drop_edges = {(u, v) if u <= v else (v, u)          # 정렬하여 set 비교
+                  for (u, v), d in edge2curv.items() if d["ricciCurvature"] > drop_thr}
+
+    # 원본 간선에서 drop 대상 제거
+    base_edges = {(u, v) if u <= v else (v, u) for u, v in G.edges()}
+    base_edges -= drop_edges
+    base_edges |= {(u, v) if u <= v else (v, u) for u, v in add_edges}  # 추가
+
+    # 5) tensor로 변환
+    src_new, dst_new = zip(*base_edges)
+    edge_index_new = torch.tensor([src_new, dst_new], dtype=torch.long,
+                                  device=device or edge_index.device)
+    edge_weight_new = torch.ones(edge_index_new.shape[1],
+                                 dtype=torch.float32, device=edge_index_new.device)
+    return edge_index_new, edge_weight_new
+
+
+# ──────────────────────────── usage ────────────────────────────
+if __name__ == "__main__":
+
+    x = CachedGraph.build_human_graph()
+
+    ei, ew = ricci_rewire(x.edge_index, num_nodes=17+7,
+                          alpha=0.7, add_pct=50.0, drop_pct=0.0, device='cuda')
+    y = CachedGraph.get_adj(17+7, ei)
+    print(f"rewired |E'| = {y[0:4]}")
+
