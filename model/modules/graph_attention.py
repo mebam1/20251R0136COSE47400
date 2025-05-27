@@ -49,7 +49,7 @@ class SkipableGAT(nn.Module):
         for conv, w1, w2 in zip(self.convs, self.proj_v1, self.proj_v2):
             x = conv(x)
             v1 = (1.0 - self.beta) * x + self.beta * w1(x)
-            v2 = (1.0 - self.beta) * x0 + self.beta * w2(x)
+            v2 = (1.0 - self.beta) * x0 + self.beta * w2(x0)
             x = (1.0 - self.alpha) * v1 + self.alpha * v2
 
         return x[..., :-n_additional_node, :]
