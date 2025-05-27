@@ -79,8 +79,8 @@ class GAT(nn.Module):
         z:torch.Tensor = self.a(z).squeeze(-1) # [B,T,E,H]
         z = torch.exp(z - z.amax(dim=2, keepdim=True))
         sigma = x.new_ones(B,T,J,self.h) * 1e-10
-        sigma = sigma.index_add(dim=2, index=start_node, source=z) # [B,T,J,H]
-        attn = z / sigma[..., start_node, :] # [B,T,E,H]
+        sigma = sigma.index_add(dim=2, index=end_node, source=z) # [B,T,J,H]
+        attn = z / sigma[..., end_node, :] # [B,T,E,H]
         attn = attn.transpose(2, 3) # [B,T,H,E]
         dense_attn = x.new_zeros(B,T,self.h,J,J)
         dense_attn[..., start_node, end_node] = attn # [B,T,H,J,J]
