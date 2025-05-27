@@ -18,13 +18,12 @@ class SkipableGAT(nn.Module):
         super().__init__()
         self.use_checkpoint = use_checkpoint
         dr = nn.Dropout(drop * 0.25, True) if drop > 0.001 else nn.Identity()
-        conv1 = nn.Sequential(GAT(dim, mode='skeleton'), dr, nn.LayerNorm(dim))
-        conv2 = nn.Sequential(GAT(dim, mode='skeleton'), dr, nn.LayerNorm(dim))
-        conv3 = nn.Sequential(GAT(dim, mode='skeleton'), dr, nn.LayerNorm(dim))
-        conv4 = nn.Sequential(GAT(dim, mode='skeleton'), nn.GELU(), dr, nn.LayerNorm(dim))
-        self.convs = nn.ModuleList([conv1, conv2, conv3, conv4])
-        self.pe = g_dict['skeleton'].encoding[None, None, ...] # [1, 1, J, 16]
-        self.proj_pe = nn.Linear(self.pe.shape[3], dim)
+        conv1 = nn.Sequential(GAT(dim, mode='skeleton'), nn.GELU(), dr, nn.LayerNorm(dim))
+        conv2 = nn.Sequential(GAT(dim, mode='skeleton'), nn.GELU(), dr, nn.LayerNorm(dim))
+        self.convs = nn.ModuleList([conv1, conv2])
+        self.proj_out = nn.Linear(dim * (len(self.convs) + 1), dim)
+        #self.pe = g_dict['skeleton'].encoding[None, None, ...] # [1, 1, J, 16]
+        #self.proj_pe = nn.Linear(self.pe.shape[3], dim)
 
     def forward(self, x:torch.Tensor):
         if self.training and self.use_checkpoint:
@@ -36,17 +35,19 @@ class SkipableGAT(nn.Module):
     def _forward_impl(self, x:torch.Tensor):
         # Consider x.shape: [B, T, J, C].
         B, T, J, C = x.shape
+        outputs = [x]
         
         # apply positional encoding.
-        x = x + self.proj_pe(self.pe)
+        #x = x + self.proj_pe(self.pe)
         # add virtual nodes.
         x = torch.cat((x, x.new_zeros((B,T,n_additional_node,C))), dim=2)
 
         for conv in self.convs:
-            x = x + conv(x)
+            x = conv(x)
+            outputs.append(x[..., :-n_additional_node, :])            
 
-        x = x[..., :-n_additional_node, :]
-        return x
+        out = torch.cat(outputs, dim=-1)
+        return self.proj_out(out)
 
 
 class GAT(nn.Module):

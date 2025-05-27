@@ -136,3 +136,4 @@ def GetPosEnc(adj, device):
 
 if __name__ == '__main__':
     test_graph = CachedGraph.build_human_graph()
+    print(test_graph.edge_index.shape)
