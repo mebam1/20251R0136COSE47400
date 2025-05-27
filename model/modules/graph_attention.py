@@ -23,7 +23,7 @@ class SkipableGAT(nn.Module):
         self.use_checkpoint = use_checkpoint
         dr = nn.Dropout(drop * 0.25, True) if drop > 0.001 else nn.Identity()
 
-        self.convs = nn.ModuleList([nn.Sequential(GAT(dim, mode='skeleton', nn.GELU(), dr, nn.LayerNorm(dim))) for _ in range(gat_depth)])
+        self.convs = nn.ModuleList([nn.Sequential(GAT(dim, mode='skeleton'), nn.GELU(), dr, nn.LayerNorm(dim)) for _ in range(gat_depth)])
         self.proj_v1 = nn.ModuleList([nn.Linear(dim, dim) for _ in range(gat_depth)])
         self.proj_v2 = nn.ModuleList([nn.Linear(dim, dim) for _ in range(gat_depth)])
 
@@ -61,7 +61,7 @@ class GAT(nn.Module):
         assert dim % n_heads == 0, "dim must be divisible by n_heads"
         self.dim_h = dim // n_heads
         self.h = n_heads
-        self.w_qk = nn.Linear(dim, (2*a_scale)*dim, bias=qkv_bias)
+        self.w_qk = nn.Linear(dim, (2*a_scale)*dim, bias=qk_bias)
         self.a = nn.Linear(a_scale*self.dim_h, 1, bias=False)
         self.a_scale = a_scale
         self.g = g_dict[mode] 
@@ -72,13 +72,13 @@ class GAT(nn.Module):
         # Let start_node[i] = start node of i-th edge.
         start_node, end_node = self.g.edge_index[0], self.g.edge_index[1]
         qk:torch.Tensor = self.w_qk(x)
-        qk = qkv.view(B,T,J,self.h,2*A)
-        q, k = torch.split(qkv, split_size_or_sections=[A,A], dim=-1) # [B,T,J,H,A]
+        qk = qk.view(B,T,J,self.h,2*A)
+        q, k = torch.split(qk, split_size_or_sections=[A,A], dim=-1) # [B,T,J,H,A]
         z = q[..., start_node,:,:] + k[..., end_node,  :,:] # [B,T,E,H,A]
         z = F.softplus(z)
         z:torch.Tensor = self.a(z).squeeze(-1) # [B,T,E,H]
         z = torch.exp(z - z.amax(dim=2, keepdim=True))
-        sigma = x.new_ones(B,T,J,self.h) * 1e-10
+        sigma = x.new_zeros(B,T,J,self.h)
         sigma = sigma.index_add(dim=2, index=end_node, source=z) # [B,T,J,H]
         attn = z / sigma[..., end_node, :] # [B,T,E,H]
         attn = attn.transpose(2, 3) # [B,T,H,E]
