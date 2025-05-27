@@ -23,7 +23,8 @@ class SkipableGAT(nn.Module):
         self.use_checkpoint = use_checkpoint
         dr = nn.Dropout(drop * 0.25, True) if drop > 0.001 else nn.Identity()
 
-        self.convs = nn.ModuleList([nn.Sequential(GAT(dim, mode='skeleton'), nn.GELU(), dr, nn.LayerNorm(dim)) for _ in range(gat_depth)])
+        self.convs = nn.ModuleList([nn.Sequential(GAT(dim, mode='skeleton'), nn.GELU(), dr) for _ in range(gat_depth)])
+        self.pre_norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(gat_depth)])
         self.proj_v1 = nn.ModuleList([nn.Linear(dim, dim) for _ in range(gat_depth)])
         self.proj_v2 = nn.ModuleList([nn.Linear(dim, dim) for _ in range(gat_depth)])
 
@@ -46,11 +47,12 @@ class SkipableGAT(nn.Module):
         x = torch.cat((x, x.new_zeros((B,T,n_additional_node,C))), dim=2)
         x0 = x
 
-        for conv, w1, w2 in zip(self.convs, self.proj_v1, self.proj_v2):
+        for conv, w1, w2, norm in zip(self.convs, self.proj_v1, self.proj_v2, self.pre_norms):
             x = conv(x)
             v1 = (1.0 - self.beta) * x + self.beta * w1(x)
             v2 = (1.0 - self.beta) * x0 + self.beta * w2(x0)
             x = (1.0 - self.alpha) * v1 + self.alpha * v2
+            x = norm(x)
 
         return x[..., :-n_additional_node, :]
 
