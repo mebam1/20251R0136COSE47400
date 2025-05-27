@@ -56,13 +56,14 @@ class SkipableGAT(nn.Module):
 
 
 class GAT(nn.Module):
-    def __init__(self, dim:int, n_heads: int = 4, qk_bias=False, a_scale:int=2, mode:str='skeleton'):
+    def __init__(self, dim:int, n_heads: int = 8, qk_bias=False, a_scale:int=2, mode:str='skeleton'):
         super().__init__()
         assert dim % n_heads == 0, "dim must be divisible by n_heads"
         self.dim_h = dim // n_heads
         self.h = n_heads
         self.w_qk = nn.Linear(dim, (2*a_scale)*dim, bias=qk_bias)
-        self.a = nn.Linear(a_scale*self.dim_h, 1, bias=False)
+        self.a = nn.Parameter(torch.empty(self.h, self.dim_h * a_scale))
+        nn.init.xavier_uniform_(self.a)
         self.a_scale = a_scale
         self.g = g_dict[mode] 
     
@@ -76,7 +77,7 @@ class GAT(nn.Module):
         q, k = torch.split(qk, split_size_or_sections=[A,A], dim=-1) # [B,T,J,H,A]
         z = q[..., start_node,:,:] + k[..., end_node,  :,:] # [B,T,E,H,A]
         z = F.softplus(z)
-        z:torch.Tensor = self.a(z).squeeze(-1) # [B,T,E,H]
+        z = torch.einsum('bteha,ha->bteh', z, self.a)
         z = torch.exp(z - z.amax(dim=2, keepdim=True))
         sigma = x.new_zeros(B,T,J,self.h)
         sigma = sigma.index_add(dim=2, index=end_node, source=z) # [B,T,J,H]
