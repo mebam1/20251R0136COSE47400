@@ -83,7 +83,7 @@ class GAT(nn.Module):
         attn = z / sigma[..., end_node, :] # [B,T,E,H]
         attn = attn.transpose(2, 3) # [B,T,H,E]
         dense_attn = x.new_zeros(B,T,self.h,J,J)
-        dense_attn[..., start_node, end_node] = attn # [B,T,H,J,J]
+        dense_attn[..., end_node, start_node] = attn # [B,T,H,J,J]
 
         x = x.view(B, T, J, self.h, self.dim_h)
         x = x.transpose(2, 3)
