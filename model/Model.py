@@ -225,7 +225,7 @@ class DSTFormerBlock(nn.Module):
         alpha = alpha.softmax(dim=-1)
         x = x_attn * alpha[..., 0:1] + x_graph * alpha[..., 1:2]
         '''
-
+        x = x_graph
         return x
 
 

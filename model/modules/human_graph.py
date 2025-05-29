@@ -12,6 +12,11 @@ class CachedGraph():
             adj = one_hop_adj + two_hop_adj
             adj.fill_diagonal_(1)
             self.edge_index = self.get_edge_index(adj)
+            print('!')
+
+            for i in range(self.edge_index.shape[1]):
+                print((self.edge_index[0, i], self.edge_index[1, i]))
+            
             #self.encoding = GetPosEnc(adj, one_hop_adj.device)
             self.num_nodes = num_nodes
 
@@ -134,3 +139,6 @@ def GetPosEnc(adj, device):
     eigvec = eigvec[:, sorted_index[1:]] # [N, 16] positional encoding
     print(eigval)
     return eigvec
+
+if __name__ == '__main__':
+    g = CachedGraph.build_human_graph()

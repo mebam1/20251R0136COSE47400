@@ -24,7 +24,6 @@ class SkipableGAT(nn.Module):
         dr = nn.Dropout(drop * 0.25, True) if drop > 0.001 else nn.Identity()
 
         self.convs = nn.ModuleList([GAT(dim, mode='skeleton') for _ in range(gat_depth)])
-        #self.pre_norms = nn.ModuleList([nn.LayerNorm(dim) for _ in range(gat_depth)])
         self.proj_v1 = nn.ModuleList([nn.Linear(dim, dim) for _ in range(gat_depth)])
         self.proj_v2 = nn.ModuleList([nn.Linear(dim, dim) for _ in range(gat_depth)])
 
@@ -58,16 +57,21 @@ class SkipableGAT(nn.Module):
 
 
 class GAT(nn.Module):
-    def __init__(self, dim:int, n_heads: int = 8, qk_bias=False, a_scale:int=2, mode:str='skeleton'):
+    def __init__(self, dim:int, n_heads: int = 4, qk_bias=False, a_scale:int=2, mode:str='skeleton'):
         super().__init__()
         assert dim % n_heads == 0, "dim must be divisible by n_heads"
         self.dim_h = dim // n_heads
         self.h = n_heads
         self.w_qk = nn.Linear(dim, (2*a_scale)*dim, bias=qk_bias)
         self.a = nn.Parameter(torch.empty(self.h, self.dim_h * a_scale))
-        nn.init.xavier_uniform_(self.a)
         self.a_scale = a_scale
         self.g = g_dict[mode] 
+        self.init_params()
+
+    def init_params(self):
+        gain = nn.init.calculate_gain('relu')
+        nn.init.xavier_normal_(self.a, gain=gain)
+        nn.init.xavier_normal_(self.w_qk.weight, gain=gain)
     
     def forward(self, x:torch.Tensor):
         B, T, J, C = x.shape
