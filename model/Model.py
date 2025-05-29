@@ -99,17 +99,7 @@ class TransBlock(nn.Module):
                 x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
         elif self.mixer_type == 'graph':
-            if self.use_layer_scale:
-                x = x + self.drop_path(
-                    self.layer_scale_1.unsqueeze(0).unsqueeze(0)
-                    * self.mixer(self.norm1(x)))
-                x = x + self.drop_path(
-                    self.layer_scale_2.unsqueeze(0).unsqueeze(0)
-                    * self.mlp(self.norm2(x)))
-            else:
-                x = x + self.drop_path(self.mixer(self.norm1(x)))
-                x = x + self.drop_path(self.mlp(self.norm2(x)))
-            return x
+            return self.mixer(self.norm1(x))
         else:
             raise NotImplementedError(f'{self.mode} is not implemented in TransBlock.forward')
     
@@ -178,7 +168,7 @@ class DSTFormerBlock(nn.Module):
         self.hierarchical = hierarchical
         dim = dim // 2 if hierarchical else dim
 
-
+        '''
         self.att_spatial = TransBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads, qkv_bias,
                                          qk_scale, use_layer_scale, layer_scale_init_value,
                                          mode='spatial', mixer_type="attention",
@@ -191,6 +181,7 @@ class DSTFormerBlock(nn.Module):
                                           use_temporal_similarity=use_temporal_similarity,
                                           neighbour_num=neighbour_num,
                                           n_frames=n_frames)
+        '''
 
 
 
@@ -225,14 +216,15 @@ class DSTFormerBlock(nn.Module):
         x: tensor with shape [B, T, J, C]
         """
 
-        x_attn = self.att_temporal(self.att_spatial(x))
+        #x_attn = self.att_temporal(self.att_spatial(x))
         x_graph = self.graph_temporal(self.graph_spatial(x))
 
-
+        '''
         alpha = torch.cat((x_attn, x_graph), dim=-1)
         alpha = self.fusion(alpha)
         alpha = alpha.softmax(dim=-1)
         x = x_attn * alpha[..., 0:1] + x_graph * alpha[..., 1:2]
+        '''
 
         return x
 
