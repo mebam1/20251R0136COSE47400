@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.linalg as linalg
 from torch.utils.checkpoint import checkpoint
-import torch.autograd.profiler as profiler
-import math
 from model.modules.human_graph import CachedGraph
+import math
 
 g_dict = {
     'skeleton':CachedGraph.build_human_graph(mode='skeleton'),
@@ -17,9 +17,9 @@ n_additional_node = g_dict['cayley'].num_nodes - g_dict['skeleton'].num_nodes
 class SkipableGAT(nn.Module):
     index_of_layer = 0
 
-    def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True, alpha:float=0.1, lamb:float=0.5):
+    def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True, alpha:float=0.1, lamb:float=0.15):
         super().__init__()
-        gat_depth:int = 4
+        gat_depth:int = 32
         self.use_checkpoint = use_checkpoint
         dr = nn.Dropout(drop * 0.25, True) if drop > 0.001 else nn.Identity()
 
@@ -30,6 +30,10 @@ class SkipableGAT(nn.Module):
         self.alpha = alpha
         self.beta = lamb / (1 + self.__class__.index_of_layer)
         self.__class__.index_of_layer += 1
+
+        for p, q in zip(self.proj_v1, self.proj_v2):
+            nn.init.xavier_normal_(p.weight)
+            nn.init.xavier_normal_(q.weight)
 
 
     def forward(self, x:torch.Tensor):
@@ -63,7 +67,7 @@ class GAT(nn.Module):
         self.dim_h = dim // n_heads
         self.h = n_heads
         self.w_qk = nn.Linear(dim, (2*a_scale)*dim, bias=qk_bias)
-        self.a = nn.Parameter(torch.empty(self.h, self.dim_h * a_scale))
+        self.a = nn.Parameter(torch.empty(self.h, self.dim_h * a_scale), requires_grad=True)
         self.a_scale = a_scale
         self.g = g_dict[mode] 
         self.init_params()
@@ -83,11 +87,11 @@ class GAT(nn.Module):
         q, k = torch.split(qk, split_size_or_sections=[A,A], dim=-1) # [B,T,J,H,A]
         z = q[..., start_node,:,:] + k[..., end_node,  :,:] # [B,T,E,H,A]
         z = F.softplus(z)
-        z = torch.einsum('bteha,ha->bteh', z, self.a)
+        z = torch.einsum('bteha,ha->bteh', z, self.a) * (1.0 / math.sqrt(A))
         z = torch.exp(z - z.amax(dim=2, keepdim=True))
         sigma = x.new_zeros(B,T,J,self.h)
         sigma = sigma.index_add(dim=2, index=end_node, source=z) # [B,T,J,H]
-        attn = z / sigma[..., end_node, :] # [B,T,E,H]
+        attn = z / (sigma[..., end_node, :] + 1e-9) # [B,T,E,H]
         attn = attn.transpose(2, 3) # [B,T,H,E]
         dense_attn = x.new_zeros(B,T,self.h,J,J)
         dense_attn[..., end_node, start_node] = attn # [B,T,H,J,J]
@@ -97,3 +101,28 @@ class GAT(nn.Module):
         x = dense_attn @ x
         x = x.transpose(2, 3).reshape(B, T, J, C)
         return x
+
+def _test():
+    dim=128
+    dev = 'cuda'
+    gat = SkipableGAT(dim, use_checkpoint=False)
+    gat.to(dev)
+    x = torch.zeros(size=(1, 1, 17, 128), device=dev)
+
+    for i in range(17):
+        x[0, 0, i, i] = 1.0
+
+    y = gat(x)
+    #print(y.shape)
+    a = y[0, 0, 0, :]
+    b = y[0, 0, 6, :]
+    print(a)
+    print(b)
+
+    print('---')
+    print((torch.sum(a * b, dim=-1) / linalg.norm(a) / linalg.norm(b)).item())
+
+
+
+if __name__ == '__main__':
+    _test()

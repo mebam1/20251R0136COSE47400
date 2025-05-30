@@ -9,14 +9,10 @@ class CachedGraph():
         if mode == 'skeleton':
             one_hop_adj = CachedGraph.get_adj(num_nodes, edge_index)
             two_hop_adj = one_hop_adj @ one_hop_adj
-            adj = one_hop_adj + two_hop_adj
+            adj = one_hop_adj
             adj.fill_diagonal_(1)
             self.edge_index = self.get_edge_index(adj)
-            print('!')
-
-            for i in range(self.edge_index.shape[1]):
-                print((self.edge_index[0, i], self.edge_index[1, i]))
-            
+            print(f'skeleton loaded: {self.edge_index.shape}')
             #self.encoding = GetPosEnc(adj, one_hop_adj.device)
             self.num_nodes = num_nodes
 
@@ -55,6 +51,11 @@ class CachedGraph():
         for u, v in new_edges:
             bidirectional_edges.append((u, v))
             bidirectional_edges.append((v, u))
+
+        for u in range(17, 24):
+            bidirectional_edges.append((u, u))
+
+        print(bidirectional_edges)
 
         new_edge_index = torch.tensor(bidirectional_edges, dtype=torch.long, device=edge_index.device).t()  # shape: [2, num_new_edges]
         e = torch.cat([edge_index, new_edge_index], dim=-1)
@@ -132,13 +133,12 @@ def GetPosEnc(adj, device):
     deg_inv_sqrt = torch.diag(torch.pow(deg.clamp(min=1e-8), -0.5)) # D^{-1/2}
     I = torch.eye(N, device=device)
     L = I - deg_inv_sqrt @ adj @ deg_inv_sqrt
-    print(L == L.t())
     
     eigval, eigvec = eigh(L) # eigen-decomposition
     sorted_index = torch.argsort(eigval)
     eigvec = eigvec[:, sorted_index[1:]] # [N, 16] positional encoding
     print(eigval)
-    return eigvec
+    return eigvec, eigval, L
 
 if __name__ == '__main__':
     g = CachedGraph.build_human_graph()
