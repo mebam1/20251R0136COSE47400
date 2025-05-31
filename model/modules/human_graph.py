@@ -5,18 +5,11 @@ from torch.linalg import eigh
 class CachedGraph():
     @torch.no_grad()
     def __init__(self, edge_index:torch.Tensor, num_nodes:int, mode:str):
-
         if mode == 'skeleton':
             one_hop_adj = CachedGraph.get_adj(num_nodes, edge_index)
-            two_hop_adj = one_hop_adj @ one_hop_adj
             adj = one_hop_adj
             adj.fill_diagonal_(1)
-            self.edge_index = self.get_edge_index(adj)
-
-
-
-            print(f'skeleton loaded: {self.edge_index.shape}')
-            #self.encoding = GetPosEnc(adj, one_hop_adj.device)
+            self.shortest_distance = floyd_warshall(adj)
             self.num_nodes = num_nodes
 
         elif mode == 'cayley':
@@ -29,9 +22,9 @@ class CachedGraph():
     @staticmethod
     @torch.no_grad()
     def get_adj(num_nodes:int, edge_index:torch.Tensor) -> torch.Tensor:
-        adj = edge_index.new_zeros((num_nodes, num_nodes), dtype=torch.float32)
+        adj = edge_index.new_zeros((num_nodes, num_nodes), dtype=torch.long)
         src, dst = edge_index[0], edge_index[1]
-        adj[src, dst] = 1.0
+        adj[src, dst] = 1
         return adj
     
     @staticmethod
@@ -146,6 +139,26 @@ def GetPosEnc(adj, device):
     eigvec = eigvec[:, sorted_index[1:]] # [N, 16] positional encoding
     print(eigval)
     return eigvec, eigval, L
+
+def floyd_warshall(adj:torch.Tensor, inf:float=1e9):
+    A = adj.clone()
+    N = A.shape[0]
+
+    mask_no_edge = (A == 0)
+    A[mask_no_edge] = inf
+    # 무가중치(0/1) 입력이면 1로
+    #A[(mask_no_edge == False) & (A == 1)] = 1
+    
+    D = A.clone()        # 거리 행렬
+    
+    # 2단계 ─ Floyd–Warshall O(N³)
+    for k in range(N):
+        # broadcasting: D[:, k][:, None] + D[k, :]
+        D = torch.minimum(D, D[:, k][:, None] + D[k, :])
+
+    D.fill_diagonal_(0)
+    print(D)
+    return D
 
 if __name__ == '__main__':
     g = CachedGraph.build_human_graph()
