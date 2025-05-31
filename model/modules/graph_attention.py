@@ -17,9 +17,9 @@ n_additional_node = g_dict['cayley'].num_nodes - g_dict['skeleton'].num_nodes
 class SkipableGAT(nn.Module):
     index_of_layer = 0
 
-    def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True, alpha:float=0.1, lamb:float=0.15):
+    def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True, alpha:float=0.1, lamb:float=0.5):
         super().__init__()
-        gat_depth:int = 2
+        gat_depth:int = 1
         self.use_checkpoint = use_checkpoint
         dr = nn.Dropout(drop * 0.25, True) if drop > 0.001 else nn.Identity()
 
@@ -61,7 +61,7 @@ class SkipableGAT(nn.Module):
 
 
 class GAT(nn.Module):
-    def __init__(self, dim:int, n_heads: int = 4, qk_bias=False, a_scale:int=2, mode:str='skeleton'):
+    def __init__(self, dim:int, n_heads: int = 8, qk_bias=False, a_scale:int=2, mode:str='skeleton'):
         super().__init__()
         assert dim % n_heads == 0, "dim must be divisible by n_heads"
         self.dim_h = dim // n_heads
@@ -73,9 +73,8 @@ class GAT(nn.Module):
         self.init_params()
 
     def init_params(self):
-        gain = nn.init.calculate_gain('relu')
+        gain = nn.init.calculate_gain('leaky_relu', 0.2)
         nn.init.xavier_normal_(self.a, gain=gain)
-        nn.init.xavier_normal_(self.w_qk.weight, gain=gain)
     
     def forward(self, x:torch.Tensor):
         B, T, J, C = x.shape
@@ -86,8 +85,8 @@ class GAT(nn.Module):
         qk = qk.view(B,T,J,self.h,2*A)
         q, k = torch.split(qk, split_size_or_sections=[A,A], dim=-1) # [B,T,J,H,A]
         z = q[..., start_node,:,:] + k[..., end_node,  :,:] # [B,T,E,H,A]
-        z = F.softplus(z)
-        z = torch.einsum('bteha,ha->bteh', z, self.a) * (1.0 / math.sqrt(A))
+        z = F.leaky_relu_(z, negative_slope=0.2)
+        z = torch.einsum('bteha,ha->bteh', z, self.a)
         z = torch.exp(z - z.amax(dim=2, keepdim=True))
         sigma = x.new_zeros(B,T,J,self.h)
         sigma = sigma.index_add(dim=2, index=end_node, source=z) # [B,T,J,H]

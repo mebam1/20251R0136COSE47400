@@ -12,6 +12,9 @@ class CachedGraph():
             adj = one_hop_adj
             adj.fill_diagonal_(1)
             self.edge_index = self.get_edge_index(adj)
+
+
+
             print(f'skeleton loaded: {self.edge_index.shape}')
             #self.encoding = GetPosEnc(adj, one_hop_adj.device)
             self.num_nodes = num_nodes
@@ -55,11 +58,15 @@ class CachedGraph():
         for u in range(17, 24):
             bidirectional_edges.append((u, u))
 
-        print(bidirectional_edges)
+        for u in range(17):
+            for v in range(17):
+                bidirectional_edges.append((u, v))
+
 
         new_edge_index = torch.tensor(bidirectional_edges, dtype=torch.long, device=edge_index.device).t()  # shape: [2, num_new_edges]
-        e = torch.cat([edge_index, new_edge_index], dim=-1)
-        return e
+        #e = torch.cat([edge_index, new_edge_index], dim=-1)
+        #return e
+        return new_edge_index
 
 
     @staticmethod

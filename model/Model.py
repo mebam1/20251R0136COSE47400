@@ -99,7 +99,9 @@ class TransBlock(nn.Module):
                 x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
         elif self.mixer_type == 'graph':
-            return self.mixer(self.norm1(x))
+            x = x + self.drop_path(self.mixer(self.norm1(x)))
+            x = x + self.drop_path(self.mlp(self.norm2(x)))
+            return x
         else:
             raise NotImplementedError(f'{self.mode} is not implemented in TransBlock.forward')
     
