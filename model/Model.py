@@ -11,6 +11,7 @@ from model.modules.attention import Attention
 from model.modules.mlp import MLP
 from model.modules.crossattention import CrossAttention
 from model.modules.bias_attention import BiasAttention
+from model.modules.graph_attention import SkipableGAT
 from model.modules.ModelBlock import MIBlock
 os.environ['CUDA_VISIBLE_DEVICES'] = '0' 
 
@@ -55,10 +56,11 @@ class TransBlock(nn.Module):
                 nn.LayerNorm(dim)
             ])
         elif mixer_type == 'attention':
-            self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop,
-                                   proj_drop=drop, mode=mode)
+            self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop=drop, mode=mode)
         elif mixer_type == 'graph':
-            self.mixer = BiasAttention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop=drop)
+            self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop=drop, mode=mode)
+            #self.mixer = SkipableGAT(dim, drop=drop, use_checkpoint=False)
+            #self.mixer = BiasAttention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop=drop)
         self.norm2 = nn.LayerNorm(dim)
 
         mlp_hidden_dim = int(dim * mlp_ratio)
@@ -170,7 +172,7 @@ class DSTFormerBlock(nn.Module):
         self.hierarchical = hierarchical
         dim = dim // 2 if hierarchical else dim
 
-        '''
+        
         self.att_spatial = TransBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads, qkv_bias,
                                          qk_scale, use_layer_scale, layer_scale_init_value,
                                          mode='spatial', mixer_type="attention",
@@ -183,7 +185,7 @@ class DSTFormerBlock(nn.Module):
                                           use_temporal_similarity=use_temporal_similarity,
                                           neighbour_num=neighbour_num,
                                           n_frames=n_frames)
-        '''
+        
 
 
 
@@ -218,16 +220,13 @@ class DSTFormerBlock(nn.Module):
         x: tensor with shape [B, T, J, C]
         """
 
-        #x_attn = self.att_temporal(self.att_spatial(x))
+        x_attn = self.att_temporal(self.att_spatial(x))
         x_graph = self.graph_temporal(self.graph_spatial(x))
-
-        '''
         alpha = torch.cat((x_attn, x_graph), dim=-1)
         alpha = self.fusion(alpha)
         alpha = alpha.softmax(dim=-1)
         x = x_attn * alpha[..., 0:1] + x_graph * alpha[..., 1:2]
-        '''
-        x = x_graph
+        
         return x
 
 

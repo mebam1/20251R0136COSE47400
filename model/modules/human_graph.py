@@ -9,6 +9,7 @@ class CachedGraph():
             one_hop_adj = CachedGraph.get_adj(num_nodes, edge_index)
             adj = one_hop_adj
             adj.fill_diagonal_(1)
+            self.edge_index = self.get_edge_index(adj)
             self.shortest_distance = floyd_warshall(adj)
             self.num_nodes = num_nodes
 
@@ -33,6 +34,7 @@ class CachedGraph():
         src, dst = adj.nonzero(as_tuple=True)
         edge_index = torch.stack([src, dst], dim=0)
 
+        
         new_edges = [
             (17, 16), (17, 18),
             (18, 13), (18, 17),
@@ -51,15 +53,9 @@ class CachedGraph():
         for u in range(17, 24):
             bidirectional_edges.append((u, u))
 
-        for u in range(17):
-            for v in range(17):
-                bidirectional_edges.append((u, v))
-
-
         new_edge_index = torch.tensor(bidirectional_edges, dtype=torch.long, device=edge_index.device).t()  # shape: [2, num_new_edges]
-        #e = torch.cat([edge_index, new_edge_index], dim=-1)
-        #return e
-        return new_edge_index
+        e = torch.cat([edge_index, new_edge_index], dim=-1)
+        return e
 
 
     @staticmethod
@@ -140,6 +136,7 @@ def GetPosEnc(adj, device):
     print(eigval)
     return eigvec, eigval, L
 
+@torch.no_grad()
 def floyd_warshall(adj:torch.Tensor, inf:float=1e9):
     A = adj.clone()
     N = A.shape[0]
@@ -157,7 +154,6 @@ def floyd_warshall(adj:torch.Tensor, inf:float=1e9):
         D = torch.minimum(D, D[:, k][:, None] + D[k, :])
 
     D.fill_diagonal_(0)
-    print(D)
     return D
 
 if __name__ == '__main__':

@@ -19,7 +19,7 @@ class SkipableGAT(nn.Module):
 
     def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True, alpha:float=0.1, lamb:float=0.5):
         super().__init__()
-        gat_depth:int = 1
+        gat_depth:int = 2
         self.use_checkpoint = use_checkpoint
         dr = nn.Dropout(drop * 0.25, True) if drop > 0.001 else nn.Identity()
 
