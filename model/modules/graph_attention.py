@@ -91,15 +91,13 @@ class GAT(nn.Module):
         z = z.transpose(2, 3) # [B, T, H, E]
 
         z_max = z.new_full(size=(B, T, self.h, J), fill_value=-1e6) # [B, T, H, J]
-        z_max = z_max.scatter_reduce_(3, end_node[None, None, None].expand(B, T, self.h, -1), z, 'amax', include_self=False)
+        idx = end_node[None, None, None].expand(B, T, self.h, -1)
+        z_max = z_max.scatter_reduce_(3, idx, z, 'amax', include_self=False)
         z = torch.exp(z - z_max[..., end_node])
         
         sigma = x.new_zeros(B,T,self.h,J)
         sigma = sigma.index_add(dim=3, index=end_node, source=z) # [B,T,H,J]
-
         attn = z / sigma[..., end_node] # [B,T,H,E]
-        print(attn[0,0])
-        
         dense_attn = x.new_zeros(B,T,self.h,J,J)
         dense_attn[..., end_node, start_node] = attn # [B,T,H,J,J]
 
