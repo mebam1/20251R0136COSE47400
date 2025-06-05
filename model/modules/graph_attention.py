@@ -82,7 +82,7 @@ class GAT(nn.Module):
         qk = qk.view(B,T,J,self.h,2*A)
         q, k = torch.split(qk, split_size_or_sections=[A,A], dim=-1) # [B,T,J,H,A]
 
-        z = q[..., start_node,:,:] + k[..., end_node,  :,:] # [B,T,E,H,A]
+        z = q[..., end_node,:,:] + k[..., start_node,  :,:] # [B,T,E,H,A]
         z = F.leaky_relu(z, negative_slope=0.2)
         z = torch.einsum('bteha,ha->bteh', z, self.a) # [B, T, E, H]
         z = z.transpose(2, 3) # [B, T, H, E]
