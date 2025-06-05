@@ -58,8 +58,8 @@ class TransBlock(nn.Module):
         elif mixer_type == 'attention':
             self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop=drop, mode=mode)
         elif mixer_type == 'graph':
-            self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop=drop, mode=mode)
-            #self.mixer = SkipableGAT(dim, drop=drop, use_checkpoint=False)
+            #self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop=drop, mode=mode)
+            self.mixer = SkipableGAT(dim, drop=drop, use_checkpoint=False)
             #self.mixer = BiasAttention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop, proj_drop=drop)
         self.norm2 = nn.LayerNorm(dim)
 
@@ -101,7 +101,7 @@ class TransBlock(nn.Module):
                 x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
         elif self.mixer_type == 'graph':
-            x = x + self.drop_path(self.mixer(self.norm1(x)))
+            x = self.mixer(self.norm1(x))
             x = x + self.drop_path(self.mlp(self.norm2(x)))
             return x
         else:

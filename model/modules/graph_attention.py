@@ -17,7 +17,7 @@ n_additional_node = g_dict['cayley'].num_nodes - g_dict['skeleton'].num_nodes
 class SkipableGAT(nn.Module):
     index_of_layer = 0
 
-    def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True, alpha:float=0.1, lamb:float=0.5):
+    def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True, alpha:float=0.1, lamb:float=0.6):
         super().__init__()
         gat_depth:int = 2
         self.use_checkpoint = use_checkpoint
@@ -84,21 +84,31 @@ class GAT(nn.Module):
         qk:torch.Tensor = self.w_qk(x)
         qk = qk.view(B,T,J,self.h,2*A)
         q, k = torch.split(qk, split_size_or_sections=[A,A], dim=-1) # [B,T,J,H,A]
+
         z = q[..., start_node,:,:] + k[..., end_node,  :,:] # [B,T,E,H,A]
-        z = F.leaky_relu_(z, negative_slope=0.2)
-        z = torch.einsum('bteha,ha->bteh', z, self.a)
-        z = torch.exp(z - z.amax(dim=2, keepdim=True))
-        sigma = x.new_zeros(B,T,J,self.h)
-        sigma = sigma.index_add(dim=2, index=end_node, source=z) # [B,T,J,H]
-        attn = z / (sigma[..., end_node, :] + 1e-9) # [B,T,E,H]
-        attn = attn.transpose(2, 3) # [B,T,H,E]
+        z = F.leaky_relu(z, negative_slope=0.2)
+        z = torch.einsum('bteha,ha->bteh', z, self.a) # [B, T, E, H]
+        z = z.transpose(2, 3) # [B, T, H, E]
+
+        z_max = z.new_full(size=(B, T, self.h, J), fill_value=-1e6) # [B, T, H, J]
+        z_max = z_max.scatter_reduce_(3, end_node[None, None, None].expand(B, T, self.h, -1), z, 'amax', include_self=False)
+        z = torch.exp(z - z_max[..., end_node])
+        
+        sigma = x.new_zeros(B,T,self.h,J)
+        sigma = sigma.index_add(dim=3, index=end_node, source=z) # [B,T,H,J]
+
+        attn = z / sigma[..., end_node] # [B,T,H,E]
+        print(attn[0,0])
+        
         dense_attn = x.new_zeros(B,T,self.h,J,J)
         dense_attn[..., end_node, start_node] = attn # [B,T,H,J,J]
 
         x = x.view(B, T, J, self.h, self.dim_h)
         x = x.transpose(2, 3)
         x = dense_attn @ x
-        x = x.transpose(2, 3).reshape(B, T, J, C)
+        x = x.transpose(2, 3)
+        x = x.reshape(B, T, J, C)
+
         return x
 
 def _test():
@@ -115,8 +125,8 @@ def _test():
     #print(y.shape)
     a = y[0, 0, 0, :]
     b = y[0, 0, 6, :]
-    print(a)
-    print(b)
+    #print(a)
+    #print(b)
 
     print('---')
     print((torch.sum(a * b, dim=-1) / linalg.norm(a) / linalg.norm(b)).item())
