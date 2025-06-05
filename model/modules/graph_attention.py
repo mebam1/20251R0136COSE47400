@@ -4,7 +4,6 @@ import torch.nn.functional as F
 import torch.linalg as linalg
 from torch.utils.checkpoint import checkpoint
 from model.modules.human_graph import CachedGraph
-import math
 
 g_dict = {
     'skeleton':CachedGraph.build_human_graph(mode='skeleton'),
@@ -17,12 +16,10 @@ n_additional_node = g_dict['cayley'].num_nodes - g_dict['skeleton'].num_nodes
 class SkipableGAT(nn.Module):
     index_of_layer = 0
 
-    def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True, alpha:float=0.1, lamb:float=0.6):
+    def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True, alpha:float=0.1, lamb:float=0.8):
         super().__init__()
-        gat_depth:int = 2
+        gat_depth:int = 1
         self.use_checkpoint = use_checkpoint
-        dr = nn.Dropout(drop * 0.25, True) if drop > 0.001 else nn.Identity()
-
         self.convs = nn.ModuleList([GAT(dim, mode='skeleton') for _ in range(gat_depth)])
         self.proj_v1 = nn.ModuleList([nn.Linear(dim, dim) for _ in range(gat_depth)])
         self.proj_v2 = nn.ModuleList([nn.Linear(dim, dim) for _ in range(gat_depth)])
@@ -90,9 +87,9 @@ class GAT(nn.Module):
         z = torch.einsum('bteha,ha->bteh', z, self.a) # [B, T, E, H]
         z = z.transpose(2, 3) # [B, T, H, E]
 
-        z_max = z.new_full(size=(B, T, self.h, J), fill_value=-1e6) # [B, T, H, J]
+        z_max = z.new_full(size=(B, T, self.h, J), fill_value=-1e8) # [B, T, H, J]
         idx = end_node[None, None, None].expand(B, T, self.h, -1)
-        z_max = z_max.scatter_reduce_(3, idx, z, 'amax', include_self=False)
+        z_max.scatter_reduce_(3, idx, z, 'amax', include_self=False)
         z = torch.exp(z - z_max[..., end_node])
         
         sigma = x.new_zeros(B,T,self.h,J)
@@ -117,14 +114,14 @@ def _test():
     x = torch.zeros(size=(1, 1, 17, 128), device=dev)
 
     for i in range(17):
-        x[0, 0, i, i] = 1.0
+        x[0, 0, i, i] = i * 0.1 + 1
 
     y = gat(x)
     #print(y.shape)
     a = y[0, 0, 0, :]
     b = y[0, 0, 6, :]
-    #print(a)
-    #print(b)
+    print(a)
+    print(b)
 
     print('---')
     print((torch.sum(a * b, dim=-1) / linalg.norm(a) / linalg.norm(b)).item())

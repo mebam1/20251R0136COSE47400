@@ -7,10 +7,10 @@ class CachedGraph():
     def __init__(self, edge_index:torch.Tensor, num_nodes:int, mode:str):
         if mode == 'skeleton':
             one_hop_adj = CachedGraph.get_adj(num_nodes, edge_index)
-            adj = one_hop_adj
+            two_hop_adj = one_hop_adj @ one_hop_adj
+            adj = one_hop_adj + two_hop_adj
             adj.fill_diagonal_(1)
             self.edge_index = self.get_edge_index(adj)
-            self.shortest_distance = floyd_warshall(adj)
             self.num_nodes = num_nodes
 
         elif mode == 'cayley':
@@ -23,9 +23,9 @@ class CachedGraph():
     @staticmethod
     @torch.no_grad()
     def get_adj(num_nodes:int, edge_index:torch.Tensor) -> torch.Tensor:
-        adj = edge_index.new_zeros((num_nodes, num_nodes), dtype=torch.long)
+        adj = edge_index.new_zeros((num_nodes, num_nodes), dtype=torch.float32)
         src, dst = edge_index[0], edge_index[1]
-        adj[src, dst] = 1
+        adj[src, dst] = 1.0
         return adj
     
     @staticmethod
@@ -33,7 +33,6 @@ class CachedGraph():
     def get_edge_index(adj:torch.Tensor) -> torch.Tensor:
         src, dst = adj.nonzero(as_tuple=True)
         edge_index = torch.stack([src, dst], dim=0)
-
         
         new_edges = [
             (17, 16), (17, 18),
