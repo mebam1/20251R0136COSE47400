@@ -18,7 +18,7 @@ class SkipableGAT(nn.Module):
 
     def __init__(self, dim:int, drop:float=0.0, use_checkpoint=True, alpha:float=0.1, lamb:float=0.8):
         super().__init__()
-        gat_depth:int = 1
+        gat_depth:int = 2
         self.use_checkpoint = use_checkpoint
         self.convs = nn.ModuleList([GAT(dim, mode='skeleton') for _ in range(gat_depth)])
         self.proj_v1 = nn.ModuleList([nn.Linear(dim, dim) for _ in range(gat_depth)])
@@ -114,7 +114,7 @@ def _test():
     x = torch.zeros(size=(1, 1, 17, 128), device=dev)
 
     for i in range(17):
-        x[0, 0, i, i] = i * 0.1 + 1
+        x[0, 0, i, i] = i  + 1
 
     y = gat(x)
     #print(y.shape)
